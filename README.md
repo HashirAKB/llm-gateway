@@ -29,7 +29,7 @@ flowchart LR
 
 Request flow, in order (see `src/gateway.ts`):
 
-1. **Auth**: the virtual key in `Authorization: Bearer` or `x-api-key` maps to a configured tenant.
+1. **Auth**: the virtual key in `Authorization: Bearer` or `x-api-key` is hashed and matched against configured tenants. Config stores only SHA-256 hashes (`npm run hash-key -- <secret>`).
 2. **Budget**: a key that has spent its `budgetUsd` gets `429 budget_exceeded`.
 3. **Rate limit**: requests/min and tokens/min token buckets per key, in memory or in Redis.
 4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`.
@@ -58,7 +58,7 @@ curl -s localhost:8080/v1/messages -H 'x-api-key: gw-demo-key-app1' -H 'content-
   -d '{"model":"fast","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Open `http://localhost:8080/dashboard` and enter the admin key `gw-demo-key-admin`.
+Open `http://localhost:8080/dashboard` and enter the admin key `gw-demo-key-admin`. The demo keys are `gw-demo-key-app1`, `gw-demo-key-app2` and `gw-demo-key-admin`; the config only holds their hashes.
 
 For the full stack (gateway, Redis for shared rate limits, Jaeger for traces, Prometheus for metrics):
 
@@ -151,7 +151,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 ## Limitations
 
 - Text-only messages. No tool use, images or documents; the stream chunk model carries text only.
-- Virtual keys live in plaintext in `config/gateway.json` (demo keys). No key management API.
+- Virtual keys live in the config file (as SHA-256 hashes in the default config). There is no key management API; adding or revoking a key means editing config and restarting.
 - Usage, budgets, cache and circuit breakers are in memory and per process. Only rate limits can be shared, via Redis. A restart resets spend, so budgets are not durable.
 - Under concurrency a key can exceed its budget by the cost of its in-flight requests.
 - If Redis is unreachable, rate limits fail open (requests are allowed and a warning is logged).
@@ -164,12 +164,11 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Store virtual keys as SHA-256 hashes, so a leaked config file does not leak usable keys.
-2. Add a time-to-first-token histogram and an idle timeout between stream chunks.
-3. Reserve worst-case cost before a call and release the remainder after, so concurrent requests cannot overshoot a budget.
-4. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
-5. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
-6. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
+1. Add a time-to-first-token histogram and an idle timeout between stream chunks.
+2. Reserve worst-case cost before a call and release the remainder after, so concurrent requests cannot overshoot a budget.
+3. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
+4. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
+5. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
 
 ## Project layout
 
@@ -201,6 +200,7 @@ config/gateway.json    demo keys, routes, prices, limits
 | `npm test` | Unit and integration tests (Redis tests run when `REDIS_URL` is set) |
 | `npm run lint` / `npm run typecheck` | ESLint / TypeScript |
 | `npm run loadtest` | Regenerate `loadtest/results.md` |
+| `npm run hash-key -- <secret>` | Print the `keyHash` to put in config for a new virtual key |
 | `npm run build && npm start` | Compile and run from `dist/` |
 
 See [LEARNING.md](LEARNING.md) for a guided study of the code.

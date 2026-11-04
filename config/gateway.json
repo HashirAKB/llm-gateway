@@ -1,8 +1,8 @@
 {
   "keys": [
     {
-      "key": "gw-demo-key-app1",
       "name": "app1",
+      "keyHash": "11c8e12119e340bfc60e2c64cbe12bc743bfc5d66844de62f2a987003a996bf5",
       "rateLimit": {
         "requestsPerMinute": 600,
         "tokensPerMinute": 200000
@@ -10,8 +10,8 @@
       "budgetUsd": 5
     },
     {
-      "key": "gw-demo-key-app2",
       "name": "app2",
+      "keyHash": "b012aff1e6baf2c36bcbf7a86e9a0084b4ade3ec5e958a741731482b8b163687",
       "rateLimit": {
         "requestsPerMinute": 30,
         "tokensPerMinute": 20000
@@ -19,8 +19,8 @@
       "budgetUsd": 0.01
     },
     {
-      "key": "gw-demo-key-admin",
       "name": "admin",
+      "keyHash": "746547c9edbc2c66c3371bf676a15c3686be21cce0a319f3bd65dbe8c412ea15",
       "admin": true
     }
   ],

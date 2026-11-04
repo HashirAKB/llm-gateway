@@ -6,23 +6,32 @@ const TargetSchema = z.object({
   model: z.string().min(1),
 });
 
-const VirtualKeySchema = z.object({
-  /** The secret the client sends. Demo keys only; see README "Limitations". */
-  key: z.string().min(8),
-  /** Human-readable name used in logs, metrics and the usage report. */
-  name: z.string().min(1),
-  /** Optional per-key limits; a missing field means "no limit". */
-  rateLimit: z
-    .object({
-      requestsPerMinute: z.number().int().positive().optional(),
-      tokensPerMinute: z.number().int().positive().optional(),
-    })
-    .optional(),
-  /** Hard spend limit in USD; requests are refused with 429 once spend reaches it. */
-  budgetUsd: z.number().positive().optional(),
-  /** Admin keys can read every key's usage (GET /v1/usage, dashboard). */
-  admin: z.boolean().default(false),
-});
+const VirtualKeySchema = z
+  .object({
+    /** The secret the client sends, in plaintext. Convenient for local demos. */
+    key: z.string().min(8).optional(),
+    /** Or: the SHA-256 hex of the secret (`npm run hash-key -- <secret>`). Preferred. */
+    keyHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "keyHash must be a lowercase sha256 hex digest")
+      .optional(),
+    /** Human-readable name used in logs, metrics and the usage report. */
+    name: z.string().min(1),
+    /** Optional per-key limits; a missing field means "no limit". */
+    rateLimit: z
+      .object({
+        requestsPerMinute: z.number().int().positive().optional(),
+        tokensPerMinute: z.number().int().positive().optional(),
+      })
+      .optional(),
+    /** Hard spend limit in USD; requests are refused with 429 once spend reaches it. */
+    budgetUsd: z.number().positive().optional(),
+    /** Admin keys can read every key's usage (GET /v1/usage, dashboard). */
+    admin: z.boolean().default(false),
+  })
+  .refine((k) => (k.key === undefined) !== (k.keyHash === undefined), {
+    message: 'Each key needs exactly one of "key" or "keyHash"',
+  });
 
 const PriceSchema = z.object({
   inputPerMTok: z.number().nonnegative(),
@@ -76,8 +85,15 @@ export const ConfigSchema = z
       })
       .prefault({}),
   })
-  // Fail at startup, not at request time, if a routable model has no price.
   .superRefine((config, ctx) => {
+    // Key names identify tenants in limits, usage and the cache, so they must be unique.
+    const names = config.keys.map((k) => k.name);
+    for (const name of new Set(names)) {
+      if (names.indexOf(name) !== names.lastIndexOf(name)) {
+        ctx.addIssue({ code: "custom", path: ["keys"], message: `Duplicate key name "${name}"` });
+      }
+    }
+    // Fail at startup, not at request time, if a routable model has no price.
     for (const [alias, targets] of Object.entries(config.routes)) {
       for (const target of targets) {
         if (!config.prices[target.model]) {
@@ -98,7 +114,9 @@ export type ResilienceConfig = GatewayConfig["resilience"];
 
 /** Parses and validates a config object; throws a readable error if it is invalid. */
 export function parseConfig(raw: unknown): GatewayConfig {
-  return ConfigSchema.parse(raw);
+  const result = ConfigSchema.safeParse(raw);
+  if (!result.success) throw new Error(`Invalid gateway config:\n${z.prettifyError(result.error)}`);
+  return result.data;
 }
 
 export function loadConfig(path: string): GatewayConfig {

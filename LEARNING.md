@@ -12,7 +12,7 @@ This is the same idea as an API gateway in front of microservices, specialised f
 
 ### 1.2 Virtual keys
 
-A virtual key is a credential the gateway issues to a client app. It is not a provider key. It identifies a *tenant* (`app1`, `app2`) so the gateway can apply per-tenant limits, budgets and usage reports, and it can be revoked without touching provider credentials. See `readApiKey` and the `onRequest` hook in `src/app.ts`.
+A virtual key is a credential the gateway issues to a client app. It is not a provider key. It identifies a *tenant* (`app1`, `app2`) so the gateway can apply per-tenant limits, budgets and usage reports, and it can be revoked without touching provider credentials. The config stores only the SHA-256 of each key, so a leaked config file does not leak working keys; on each request the presented key is hashed and looked up (`KeyStore` in `src/auth.ts`). A fast hash is fine here, unlike for passwords, because keys are long random strings with nothing to guess from a dictionary.
 
 ### 1.3 Routing and aliases
 
@@ -95,7 +95,7 @@ Read in this order. Each file is small; the comment at the top of each says what
 | 15 | `src/guardrails/guardrail.ts` and `pii.ts` | A plugin interface and a readable regex approach. |
 | 16 | `src/gateway.ts` | The pipeline: every step above, in order, in one place. |
 | 17 | `src/telemetry/metrics.ts` and `tracing.ts` | Prometheus metric types; OpenTelemetry tracer setup and exporters. |
-| 18 | `src/app.ts` | The HTTP layer: auth hook, routes, SSE rendering, request ids, logs. |
+| 18 | `src/auth.ts` and `src/app.ts` | The HTTP layer: auth hook, routes, SSE rendering, request ids, logs. |
 | 19 | `src/server.ts` | Wiring for production: config file, env vars, graceful shutdown. |
 | 20 | `test/` | Start with `circuit-breaker.test.ts` and `router.test.ts`: they read like a specification. |
 
@@ -111,7 +111,7 @@ curl -s localhost:8080/v1/messages -H 'x-api-key: gw-demo-key-app1' -H 'content-
 Assume no `ANTHROPIC_API_KEY`, so `smart` resolves to its only registered target, `mock/mock-smart`.
 
 1. **Request id.** Fastify sees no `x-request-id` header and calls `genReqId`, producing a UUID. The app-level `onRequest` hook in `src/app.ts` copies it into the response header `x-request-id`. Every log line for this request carries it as `requestId`.
-2. **Authentication.** The `/v1` plugin's `onRequest` hook calls `readApiKey`, finds `gw-demo-key-app1` in `keysBySecret`, and sets `request.virtualKey` to the `app1` key config. An unknown key would throw `GatewayError(401)`, which the error handler renders as `{"type":"error","error":{"type":"authentication_error",...}}`.
+2. **Authentication.** The `/v1` plugin's `onRequest` hook calls `readApiKey`, then `keyStore.find`, which hashes `gw-demo-key-app1` with SHA-256 and finds the matching `keyHash` in config. It sets `request.virtualKey` to the `app1` key config. An unknown key would throw `GatewayError(401)`, which the error handler renders as `{"type":"error","error":{"type":"authentication_error",...}}`.
 3. **Validation.** The route handler calls `parseBody`, which runs `MessagesRequestSchema.safeParse`. A missing `max_tokens` would become a 400 listing the bad fields. It records `{ model: "smart", stream: false }` in `request.summary` for the log line.
 4. **Request span.** `gateway.complete` opens a `gateway.request` span with attributes `gateway.key=app1`, `gateway.model=smart`, and makes it the active span.
 5. **Budget.** `Gateway.admit` asks `UsageMeter.spentUsd("app1")`. It is below `budgetUsd` (5), so the request continues.

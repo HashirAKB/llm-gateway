@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "loadtest": "tsx scripts/loadtest.ts",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "hash-key": "tsx scripts/hash-key.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.4.0",

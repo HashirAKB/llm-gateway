@@ -4,6 +4,7 @@ import type { Writable } from "node:stream";
 import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
+import { KeyStore, readApiKey } from "./auth.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { ClientAbortedError, GatewayError, ProviderError } from "./errors.js";
 import { Gateway, type StreamResult } from "./gateway.js";
@@ -88,7 +89,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
     metrics,
     tracer: tracing.tracer,
   });
-  const keysBySecret = new Map(config.keys.map((k) => [k.key, k]));
+  const keyStore = new KeyStore(config.keys);
 
   app.addHook("onRequest", async (request, reply) => {
     reply.header("x-request-id", request.id);
@@ -127,8 +128,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   app.register(async (v1) => {
     // Every /v1 route requires a valid virtual key.
     v1.addHook("onRequest", async (request) => {
-      const secret = readApiKey(request);
-      const key = secret ? keysBySecret.get(secret) : undefined;
+      const key = keyStore.find(readApiKey(request));
       if (!key) throw new GatewayError(401, "authentication_error", "Missing or invalid API key");
       request.virtualKey = key;
     });
@@ -278,13 +278,6 @@ function routingHeaders(target: Target, attempts: number): Record<string, string
     "x-gateway-model": target.model,
     "x-gateway-attempts": String(attempts),
   };
-}
-
-function readApiKey(request: FastifyRequest): string | undefined {
-  const header = request.headers.authorization;
-  if (header?.startsWith("Bearer ")) return header.slice("Bearer ".length).trim();
-  const xApiKey = request.headers["x-api-key"];
-  return typeof xApiKey === "string" ? xApiKey : undefined;
 }
 
 function parseBody(raw: unknown): MessagesRequest {

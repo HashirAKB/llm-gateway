@@ -32,7 +32,7 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Alternatives:** raw `fetch` + hand-written SSE parser; let the SDK retry.
 - **Why:** the SDK gives typed errors and stream parsing. Gateway-level retries would multiply with SDK retries. Current Claude models (API version 2026-10-21) reject sampling parameters; the gateway still uses `temperature` for its cache policy.
 
-## D7. Plaintext demo keys in the config file
+## D7. Plaintext demo keys in the config file (superseded by D29)
 - **Decision:** virtual keys are stored as plaintext in `config/gateway.json`.
 - **Alternatives:** store SHA-256 hashes; a key management API.
 - **Why:** keeps the quickstart copy-pasteable. Listed as a limitation; hashing is on the "next" list.
@@ -133,3 +133,8 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D28. "No mention of Anthropic" applies to attribution, not to the provider
 - **Decision:** the code keeps `AnthropicProvider`, `src/providers/anthropic.ts`, `ANTHROPIC_API_KEY` and Claude model ids.
 - **Why:** the brief itself specifies an `AnthropicProvider` used when `ANTHROPIC_API_KEY` is set. The rule's purpose is to keep AI-assistance attribution out of the repository; no commit, comment or doc contains such attribution.
+
+## D29. Virtual keys stored as SHA-256 hashes
+- **Decision:** config accepts `keyHash` (preferred) or `key` (plaintext, for quick local setups), exactly one per key. Lookups hash the presented secret and match on the hash. The default config ships hashes only. Key names must be unique.
+- **Alternatives:** bcrypt/argon2; keeping plaintext.
+- **Why:** a leaked config file no longer leaks working keys. Slow password hashes protect low-entropy secrets; virtual keys are long random strings, so SHA-256 is enough and keeps per-request cost negligible.
