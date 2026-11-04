@@ -3,6 +3,9 @@ import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { GatewayError, ProviderError } from "./errors.js";
 import { Gateway, type StreamResult } from "./gateway.js";
+import type { Guardrail } from "./guardrails/guardrail.js";
+import { PiiRedactionGuardrail } from "./guardrails/pii.js";
+import { UsageMeter } from "./metering.js";
 import type { Provider } from "./providers/provider.js";
 import { RateLimiter } from "./rate-limit/limiter.js";
 import { MemoryRateLimitStore, type RateLimitStore } from "./rate-limit/store.js";
@@ -33,7 +36,9 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false });
   const rateLimitStore = options.rateLimitStore ?? new MemoryRateLimitStore();
   const router = new Router(config.routes, providers, config.resilience);
-  const gateway = new Gateway(config, router, new RateLimiter(rateLimitStore));
+  const meter = new UsageMeter();
+  const guardrails: Guardrail[] = config.guardrails.piiRedaction ? [new PiiRedactionGuardrail()] : [];
+  const gateway = new Gateway({ config, router, limiter: new RateLimiter(rateLimitStore), meter, guardrails });
   const keysBySecret = new Map(config.keys.map((k) => [k.key, k]));
 
   app.addHook("onClose", () => rateLimitStore.close());
@@ -75,9 +80,20 @@ export function buildApp(options: AppOptions): FastifyInstance {
       return reply
         .headers({
           "x-gateway-cache": result.cache,
+          "x-gateway-redactions": String(result.guardrailFindings),
           ...(result.target ? routingHeaders(result.target, result.attempts) : {}),
         })
         .send(result.response);
+    });
+
+    // Usage per key. A normal key sees only itself; an admin key sees every key.
+    v1.get("/v1/usage", async (request) => {
+      const caller = request.virtualKey!;
+      const visible = caller.admin ? config.keys : [caller];
+      const keys = Object.fromEntries(
+        visible.map((k) => [k.name, { ...meter.report(k.name), budgetUsd: k.budgetUsd ?? null }]),
+      );
+      return { keys };
     });
   });
 
@@ -90,7 +106,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
  * From now on a failure can only be reported as an SSE `error` event.
  */
 async function sendStream(request: FastifyRequest, reply: FastifyReply, result: StreamResult) {
-  const { target, attempts, start, chunks } = result;
+  const { target, attempts, start, chunks, guardrailFindings } = result;
   reply.hijack();
   const res = reply.raw;
   res.writeHead(200, {
@@ -98,6 +114,7 @@ async function sendStream(request: FastifyRequest, reply: FastifyReply, result: 
     "cache-control": "no-cache",
     connection: "keep-alive",
     "x-gateway-cache": "SKIP",
+    "x-gateway-redactions": String(guardrailFindings),
     ...routingHeaders(target, attempts),
   });
 

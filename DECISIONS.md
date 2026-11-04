@@ -65,3 +65,26 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D13. Cache hits refund the token estimate and record zero cost
 - **Decision:** a cache hit still costs one request in the requests bucket but no LLM tokens.
 - **Why:** the token limit exists to protect upstream spend and capacity; a hit uses neither.
+
+## D14. Budgets are checked before the call, against spend so far
+- **Decision:** a key whose recorded spend is >= its `budgetUsd` gets 429 `budget_exceeded`. The request that crosses the line is allowed to finish.
+- **Alternatives:** reserve the worst-case cost (estimate x price) before the call and release the remainder after.
+- **Why:** simple and exact for sequential traffic. With many concurrent requests a key can overshoot by at most the cost of its in-flight requests. Reservation is on the "next" list.
+
+## D15. Prices are per concrete model and validated at startup
+- **Decision:** config fails to load if any route target model has no price. Cost is computed from the configured target model, not the model string the provider echoes back.
+- **Why:** a missing price would otherwise surface as a runtime error (or silent $0) on the first request.
+
+## D16. Guardrails: synchronous before/after hooks; `after` runs on JSON replies only
+- **Decision:** `Guardrail { before?(request), after?(response) }`, run in order. Streams get `before` only.
+- **Alternatives:** async hooks; chunk-aware output hooks for streams.
+- **Why:** the one real guardrail (regex PII redaction) is synchronous and acts on input. Scanning streamed output needs buffering across chunk boundaries; noted as a limitation.
+
+## D17. Phone detection by digit count
+- **Decision:** find digit runs that may include `+ ( ) . - space`, then redact only runs with 10 to 15 digits.
+- **Alternatives:** one large country-aware regex, or a library such as libphonenumber.
+- **Why:** readable, no dependency, and leaves years, prices and order numbers alone. Misses short local numbers; documented.
+
+## D18. Usage visibility: own key, or all keys for admin keys
+- **Decision:** `GET /v1/usage` returns the caller's usage; a key with `admin: true` sees every configured key. The dashboard uses an admin key.
+- **Why:** smallest change that keeps tenants from reading each other's spend.

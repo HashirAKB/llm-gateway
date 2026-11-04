@@ -80,7 +80,7 @@ storeContract("memory", () => new MemoryRateLimitStore());
 storeContract("redis", () => (process.env.REDIS_URL ? new RedisRateLimitStore(process.env.REDIS_URL) : undefined));
 
 describe("RateLimiter", () => {
-  const key = { key: "k-123456789", name: "app", rateLimit: { requestsPerMinute: 2, tokensPerMinute: 100 } };
+  const key = { key: "k-123456789", name: "app", admin: false, rateLimit: { requestsPerMinute: 2, tokensPerMinute: 100 } };
 
   it("enforces requests per minute with a 429 and retry-after", async () => {
     const limiter = new RateLimiter(new MemoryRateLimitStore(() => 0));
@@ -109,7 +109,7 @@ describe("RateLimiter", () => {
 
   it("is a no-op for keys without limits", async () => {
     const limiter = new RateLimiter(new MemoryRateLimitStore());
-    for (let i = 0; i < 100; i++) await limiter.check({ key: "k-123456789", name: "free" }, 1_000_000);
+    for (let i = 0; i < 100; i++) await limiter.check({ key: "k-123456789", name: "free", admin: false }, 1_000_000);
   });
 });
 

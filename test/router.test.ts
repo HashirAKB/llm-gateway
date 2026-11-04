@@ -16,6 +16,10 @@ function makeRouter(providers: Record<string, Provider>, overrides: Record<strin
         { provider: "healthy", model: "healthy-model" },
       ],
     },
+    prices: {
+      "flaky-model": { inputPerMTok: 1, outputPerMTok: 1 },
+      "healthy-model": { inputPerMTok: 1, outputPerMTok: 1 },
+    },
     resilience: {
       timeoutMs: 50,
       retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },

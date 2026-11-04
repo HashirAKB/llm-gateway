@@ -6,7 +6,8 @@
       "rateLimit": {
         "requestsPerMinute": 600,
         "tokensPerMinute": 200000
-      }
+      },
+      "budgetUsd": 5
     },
     {
       "key": "gw-demo-key-app2",
@@ -14,7 +15,13 @@
       "rateLimit": {
         "requestsPerMinute": 30,
         "tokensPerMinute": 20000
-      }
+      },
+      "budgetUsd": 0.01
+    },
+    {
+      "key": "gw-demo-key-admin",
+      "name": "admin",
+      "admin": true
     }
   ],
   "routes": {
@@ -43,10 +50,27 @@
       }
     ]
   },
-  "mock": {
-    "latencyMs": 50,
-    "chunkDelayMs": 5,
-    "errorRate": 0
+  "prices": {
+    "claude-opus-5-5": {
+      "inputPerMTok": 4,
+      "outputPerMTok": 20
+    },
+    "claude-sonnet-5-5": {
+      "inputPerMTok": 2,
+      "outputPerMTok": 10
+    },
+    "claude-haiku-5-5": {
+      "inputPerMTok": 0.1,
+      "outputPerMTok": 0.5
+    },
+    "mock-smart": {
+      "inputPerMTok": 4,
+      "outputPerMTok": 20
+    },
+    "mock-fast": {
+      "inputPerMTok": 0.1,
+      "outputPerMTok": 0.5
+    }
   },
   "resilience": {
     "timeoutMs": 30000,
@@ -65,5 +89,13 @@
     "ttlMs": 300000,
     "maxEntries": 10000,
     "cacheNonZeroTemperature": false
+  },
+  "guardrails": {
+    "piiRedaction": true
+  },
+  "mock": {
+    "latencyMs": 50,
+    "chunkDelayMs": 5,
+    "errorRate": 0
   }
 }

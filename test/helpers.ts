@@ -16,6 +16,10 @@ export function testConfig(overrides: Record<string, unknown> = {}) {
     routes: {
       fast: [{ provider: "mock", model: "mock-fast" }],
     },
+    prices: {
+      "mock-fast": { inputPerMTok: 0.1, outputPerMTok: 0.5 },
+      "flaky-model": { inputPerMTok: 1, outputPerMTok: 5 },
+    },
     ...overrides,
   });
 }
