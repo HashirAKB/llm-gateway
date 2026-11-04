@@ -1,0 +1,18 @@
+{
+  "keys": [
+    { "key": "gw-demo-key-app1", "name": "app1" },
+    { "key": "gw-demo-key-app2", "name": "app2" }
+  ],
+  "routes": {
+    "fast": [
+      { "provider": "anthropic", "model": "claude-haiku-5-5" },
+      { "provider": "mock", "model": "mock-fast" }
+    ],
+    "smart": [
+      { "provider": "anthropic", "model": "claude-opus-5-5" },
+      { "provider": "anthropic", "model": "claude-sonnet-5-5" },
+      { "provider": "mock", "model": "mock-smart" }
+    ]
+  },
+  "mock": { "latencyMs": 50, "chunkDelayMs": 5, "errorRate": 0 }
+}
