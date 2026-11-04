@@ -101,3 +101,6 @@ client. Once streaming has started, an upstream failure is reported as an SSE `e
 
 1. **Node 22+ instead of Node 20+.** Node 20 reached end of life in April 2026 and vitest 5 requires Node >= 22.12. CI and Docker use Node 22 LTS.
 2. **TypeScript pinned to 6.0.x.** TypeScript 7 (native compiler) is out, but typescript-eslint 8 supports only `<6.1`.
+3. **OpenTelemetry 3.x packages.** The 2.x trace SDK requires `@opentelemetry/api` < 1.10, which conflicts with the Anthropic SDK. Moved to the 3.x line (`@opentelemetry/sdk-trace`). See DECISIONS.md D19.
+4. **Docker image not built in the development sandbox.** Pulling `node:22-alpine` from Docker Hub was refused (HTTP 429). Not retried through other registries. Instead: the runtime stage was reproduced locally (production-only `npm ci`, `node dist/server.js`, health and message requests succeed), `docker compose config` validates the compose file, and CI has a `docker` job that builds the image and smoke-tests it on GitHub's runners.
+5. **Load test p95 computed in the script.** autocannon's histogram has no p95, so the script records every response time and computes p50/p95/p99 itself.

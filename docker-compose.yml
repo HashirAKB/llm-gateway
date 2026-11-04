@@ -1,0 +1,36 @@
+# Gateway + Redis (shared rate limits) + Jaeger (traces) + Prometheus (metrics).
+#   docker compose up --build
+# Gateway:    http://localhost:8080  (dashboard at /dashboard)
+# Jaeger UI:  http://localhost:16686
+# Prometheus: http://localhost:9090
+services:
+  gateway:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: llm-gateway
+      # Optional: set in .env to route "fast"/"smart" to the real Anthropic API.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    ports: ["16686:16686"]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports: ["9090:9090"]
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro

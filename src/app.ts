@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Writable } from "node:stream";
 import type { SpanExporter } from "@opentelemetry/sdk-trace";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { GatewayError, ProviderError } from "./errors.js";
@@ -59,10 +59,10 @@ export function buildApp(options: AppOptions): FastifyInstance {
     logger: options.logger ? loggerOptions(options.logger) : false,
     // Reuse the caller's request id if it sent one, so logs line up across services.
     requestIdHeader: "x-request-id",
-    requestIdLogLabel: "requestId",
     genReqId: () => randomUUID(),
-    // We write one summary line per request ourselves (see onResponse below).
-    disableRequestLogging: true,
+    // Label request ids "requestId" in logs. Fastify's own per-request lines are off:
+    // we write one summary line per request ourselves (see onResponse below).
+    logController: new LogController({ requestIdLogLabel: "requestId", disableRequestLogging: true }),
   });
 
   const tracing = createTracing(process.env, options.spanExporter);

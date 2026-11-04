@@ -25,3 +25,15 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t llm-gateway:ci .
+      - name: Smoke test the image
+        run: |
+          docker run -d --name gw -p 8080:8080 llm-gateway:ci
+          for i in $(seq 1 20); do curl -sf localhost:8080/health && break; sleep 1; done
+          curl -sf localhost:8080/v1/messages -H 'x-api-key: gw-demo-key-app1' -H 'content-type: application/json' \
+            -d '{"model":"fast","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}'
