@@ -8,8 +8,18 @@ Each milestone: tests first, simplest implementation, all checks green, commit, 
 - [x] M3 Rate limiting (memory + Redis token buckets) + response cache
 - [x] M4 Cost metering, `/v1/usage`, budgets, PII redaction guardrail
 - [x] M5 Observability (logs, Prometheus, OpenTelemetry) + dashboard
-- [ ] M6 Load test, Docker, docs (README, LEARNING, ADRs, SUMMARY), senior review pass
+- [x] M6 Load test, Docker, docs (README, LEARNING, ADRs, SUMMARY), senior review pass
+
+## After the Definition of Done: "What I'd do next" (from README)
+
+- [ ] N1 Store virtual keys as SHA-256 hashes
+- [ ] N2 Time-to-first-token histogram and stream idle timeout
+- [ ] N3 Budget reservation for concurrent requests
+- [ ] N4 Output guardrails on streams
+- [ ] N5 Redis-backed response cache and usage ledger
+- [ ] N6 Latency-aware routing
 
 ## Blockers
 
 - M2 and M3 were committed together because the shell was unavailable for a while between them (a transient tool outage), so there was no clean point to commit M2 alone.
+- Docker Hub refused base image pulls in the sandbox (HTTP 429). The image is built and smoke-tested in CI instead (see SPEC.md Deviations).

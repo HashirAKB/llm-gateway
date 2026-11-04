@@ -129,3 +129,7 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D27. Fallback metric counts only real fallbacks
 - **Decision:** `gateway_fallbacks_total` increments only when another target follows the failed one.
 - **Why:** found in review: the last target's failure was counted as a "fallback" that never happened.
+
+## D28. "No mention of Anthropic" applies to attribution, not to the provider
+- **Decision:** the code keeps `AnthropicProvider`, `src/providers/anthropic.ts`, `ANTHROPIC_API_KEY` and Claude model ids.
+- **Why:** the brief itself specifies an `AnthropicProvider` used when `ANTHROPIC_API_KEY` is set. The rule's purpose is to keep AI-assistance attribution out of the repository; no commit, comment or doc contains such attribution.
