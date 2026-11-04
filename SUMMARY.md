@@ -9,7 +9,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 - Resilience per target: retries with exponential backoff and full jitter (retryable errors only), per-attempt timeouts via `AbortSignal`, and a per-provider circuit breaker (closed, open, half-open). Streams are retried only before the first byte, then guarded by an idle timeout between chunks.
 - Per-key token-bucket rate limits for requests/min and tokens/min, with an in-memory store and an atomic Redis (Lua) store that pass the same contract tests.
 - An exact-match response cache with TTL and LRU eviction, keyed on a normalised request hash, scoped per tenant, limited to deterministic non-streaming requests.
-- Cost metering from a price table, `GET /v1/usage`, and hard per-key budgets returning `429 budget_exceeded`.
+- Cost metering from a price table, `GET /v1/usage`, and hard per-key budgets returning `429 budget_exceeded`, enforced under concurrency by reserving each request's worst-case cost.
 - A pluggable guardrail interface with a regex PII redactor for emails and phone numbers (toggleable).
 - Observability: one structured JSON log line per request with request ids, Prometheus `/metrics` (latency and time-to-first-token histograms, upstream failures, retries, fallbacks, cache lookups, tokens, cost, breaker state), and OpenTelemetry spans for each request and each upstream attempt.
 - A static dashboard showing usage, p50/p95 latency, cache hit rate, cost and budget use per key.
@@ -31,7 +31,6 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 - Text-only messages: no tool use, images or documents.
 - Keys live in the config file (hashed); there is no key management API.
 - Usage, budgets, cache and breakers are per process and in memory; a restart resets spend.
-- Concurrent requests can overshoot a budget by their own cost.
 - PII redaction is regex-based and input-only for streams.
 - Token estimates before a call use a 4 characters per token heuristic.
 
@@ -39,5 +38,5 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 
 - Built a self-hostable LLM gateway in TypeScript and Fastify with a Messages-style API, SSE streaming, virtual API keys, alias-based routing and ordered provider fallback, testable fully offline through a deterministic mock provider.
 - Implemented resilience primitives from scratch (retries with exponential backoff and full jitter, AbortSignal timeouts, and a per-provider circuit breaker with tested closed, open and half-open transitions); a load test showed retries cut a 10% injected upstream error rate to 0.12%.
-- Designed per-tenant token-bucket rate limiting with an atomic Redis Lua implementation, an exact-match response cache (8.6x throughput and 10x lower median latency on repeated prompts), and per-key cost metering with hard budgets.
+- Designed per-tenant token-bucket rate limiting with an atomic Redis Lua implementation, an exact-match response cache (8.6x throughput and 10x lower median latency on repeated prompts), and per-key cost metering with hard budgets that hold under concurrency through worst-case cost reservation.
 - Instrumented the service with structured request logs, Prometheus metrics and OpenTelemetry traces, shipped with Docker Compose (Redis, Jaeger, Prometheus) and GitHub Actions CI, backed by 96 unit and integration tests.

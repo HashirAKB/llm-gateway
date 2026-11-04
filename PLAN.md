@@ -14,7 +14,7 @@ Each milestone: tests first, simplest implementation, all checks green, commit, 
 
 - [x] N1 Store virtual keys as SHA-256 hashes
 - [x] N2 Time-to-first-token histogram and stream idle timeout
-- [ ] N3 Budget reservation for concurrent requests
+- [x] N3 Budget reservation for concurrent requests
 - [ ] N4 Output guardrails on streams
 - [ ] N5 Redis-backed response cache and usage ledger
 - [ ] N6 Latency-aware routing

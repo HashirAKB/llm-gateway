@@ -50,7 +50,7 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D10. Streams: timeout bounds time to first byte; no retry after it
 - **Decision:** for streams, the per-attempt timeout covers the wait for the `start` chunk. After that the stream runs until done or the client disconnects. A mid-stream failure becomes an SSE `error` event and is not counted against the breaker.
 - **Alternatives:** an idle timeout between chunks; replaying the request on another provider mid-stream.
-- **Why:** bytes already sent cannot be taken back, so mid-stream replay would duplicate text. An inter-chunk idle timeout is on the "next" list.
+- **Why:** bytes already sent cannot be taken back, so mid-stream replay would duplicate text. An inter-chunk idle timeout was added later (D30).
 
 ## D11. Token rate limit: check an estimate, reconcile with real usage
 - **Decision:** before the call, take `estimate = ceil(input chars / 4) + max_tokens` from the tokens bucket. After the call, charge (or refund) the difference to the real total. The bucket may go negative.
@@ -66,7 +66,7 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** a cache hit still costs one request in the requests bucket but no LLM tokens.
 - **Why:** the token limit exists to protect upstream spend and capacity; a hit uses neither.
 
-## D14. Budgets are checked before the call, against spend so far
+## D14. Budgets are checked before the call, against spend so far (superseded by D31)
 - **Decision:** a key whose recorded spend is >= its `budgetUsd` gets 429 `budget_exceeded`. The request that crosses the line is allowed to finish.
 - **Alternatives:** reserve the worst-case cost (estimate x price) before the call and release the remainder after.
 - **Why:** simple and exact for sequential traffic. With many concurrent requests a key can overshoot by at most the cost of its in-flight requests. Reservation is on the "next" list.
@@ -143,3 +143,8 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** after the first chunk, each chunk must arrive within `resilience.streamIdleTimeoutMs` (default 30s). On timeout the upstream is cancelled through a dedicated abort controller and the client gets an SSE `error` event. Time to first token is a separate histogram, labelled by key and alias.
 - **Alternatives:** a total stream deadline.
 - **Why:** long answers legitimately take minutes, so a total deadline would cut off healthy streams; silence is the real failure signal. TTFT is the latency users perceive in chat UIs, so it deserves its own metric.
+
+## D31. Budgets reserve the worst-case cost of each request
+- **Decision:** admission reserves `cost(estimated input, max_tokens)` at the most expensive model the alias can route to, and refuses the request if `spent + reserved + worstCase > budget`. Settlement releases the reservation and records the real cost; any failure path releases it too. Check and reservation happen synchronously, with no `await` between them.
+- **Alternatives:** check spend only (D14, allowed overshoot under concurrency); reserve at the first target's price (cheaper, but fallback to a pricier model could overshoot).
+- **Why:** the budget is advertised as hard. Reserving the worst case is the simplest rule that makes it hold for concurrent traffic. The cost is conservatism near the limit.

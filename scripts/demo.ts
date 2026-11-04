@@ -13,7 +13,7 @@ const config = parseConfig({
   keys: [
     { key: "demo-key-app", name: "app", budgetUsd: 1 },
     { key: "demo-key-tight", name: "tight", rateLimit: { requestsPerMinute: 2 } },
-    { key: "demo-key-poor", name: "poor", budgetUsd: 0.000001 },
+    { key: "demo-key-poor", name: "poor", budgetUsd: 0.00006 },
   ],
   routes: {
     fast: [{ provider: "mock", model: "mock-fast" }],
@@ -116,8 +116,8 @@ for (let i = 1; i <= 3; i++) {
   console.log(`request ${i}:`, r.status, r.status === 429 ? r.json.error.message : "");
 }
 
-section("7. Budget: key 'poor' has a $0.000001 budget");
-for (let i = 1; i <= 2; i++) {
+section("7. Budget: key 'poor' has a $0.00006 budget (each request may cost up to ~$0.00005)");
+for (let i = 1; i <= 3; i++) {
   const r = await post("demo-key-poor", ask("Spend money"));
   console.log(`request ${i}:`, r.status, r.status === 429 ? `${r.json.error.type}: ${r.json.error.message}` : "");
 }

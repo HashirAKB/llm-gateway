@@ -30,7 +30,7 @@ flowchart LR
 Request flow, in order (see `src/gateway.ts`):
 
 1. **Auth**: the virtual key in `Authorization: Bearer` or `x-api-key` is hashed and matched against configured tenants. Config stores only SHA-256 hashes (`npm run hash-key -- <secret>`).
-2. **Budget**: a key that has spent its `budgetUsd` gets `429 budget_exceeded`.
+2. **Budget**: the request's worst-case cost is reserved against the key's `budgetUsd`; if spend plus in-flight reservations plus this request could exceed it, the answer is `429 budget_exceeded`.
 3. **Rate limit**: requests/min and tokens/min token buckets per key, in memory or in Redis.
 4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`.
 5. **Cache**: identical deterministic requests are answered from memory.
@@ -100,9 +100,10 @@ request 1: 200
 request 2: 200
 request 3: 429 Key "tight" exceeded its requests per minute limit
 
-=== 7. Budget: key 'poor' has a $0.000001 budget ===
+=== 7. Budget: key 'poor' has a $0.00006 budget (each request may cost up to ~$0.00005) ===
 request 1: 200
-request 2: 429 budget_exceeded: Key "poor" has spent $0.000008 of its $0.000001 budget
+request 2: 200
+request 3: 429 budget_exceeded: Key "poor" has $0.000044 left of its $0.00006 budget (including requests in flight); this request may cost up to $0.000050
 ```
 
 In step 5, the first request tries the broken provider twice (retry), opens its circuit, and falls back: 3 attempts. Later requests skip the open circuit straight away: 1 attempt, no added latency.
@@ -144,7 +145,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 - **Rate limits check an estimate, then reconcile** ([ADR 0003](docs/adr/0003-token-bucket-rate-limits.md)). Exact real token counts are only known after the call. The bucket can go negative, which keeps the long-run rate correct.
 - **The Redis store runs the token bucket in Lua** for atomicity across instances, with Redis `TIME` as the shared clock.
 - **The cache is exact-match, per tenant, temperature 0 only** ([ADR 0004](docs/adr/0004-exact-match-cache.md)). Safe by default; lower hit rate than a shared or semantic cache.
-- **Budgets are checked against spend so far.** Simple and exact for sequential traffic; concurrent requests can overshoot by their own cost.
+- **Budgets reserve the worst case.** Each request reserves (estimated input + `max_tokens`) at the priciest model its alias may use, and swaps the reservation for the real cost when it finishes. Concurrent requests can never overshoot the budget together; the price is that a key near its limit is refused slightly earlier than strictly necessary.
 - **One summary log line per request; Prometheus counters; OTel spans per attempt** ([ADR 0005](docs/adr/0005-observability.md)).
 - **Small surface on purpose.** Text-only messages, config-file keys, in-memory usage. Each is listed below as a limitation, not hidden.
 
@@ -153,7 +154,6 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 - Text-only messages. No tool use, images or documents; the stream chunk model carries text only.
 - Virtual keys live in the config file (as SHA-256 hashes in the default config). There is no key management API; adding or revoking a key means editing config and restarting.
 - Usage, budgets, cache and circuit breakers are in memory and per process. Only rate limits can be shared, via Redis. A restart resets spend, so budgets are not durable.
-- Under concurrency a key can exceed its budget by the cost of its in-flight requests.
 - If Redis is unreachable, rate limits fail open (requests are allowed and a warning is logged).
 - Streams cut off midway are metered from an estimate of the text already sent, not from provider-reported usage.
 - PII redaction is regex-based: emails and 10 to 15 digit phone numbers only. It misses names, addresses and unusual formats. Output guardrails do not run on streams.
@@ -164,10 +164,9 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Reserve worst-case cost before a call and release the remainder after, so concurrent requests cannot overshoot a budget.
-2. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
-3. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
-4. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
+1. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
+2. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
+3. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
 
 ## Project layout
 

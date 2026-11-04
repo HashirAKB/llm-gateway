@@ -51,10 +51,10 @@ describe("UsageMeter", () => {
 describe("usage and budgets through the HTTP API", () => {
   const config = testConfig({
     keys: [
-      { key: KEY, name: "app1", budgetUsd: 0.000001 },
+      // Room for the worst case of about two requests (see test/budget-reservation.test.ts).
+      { key: KEY, name: "app1", budgetUsd: 0.00006 },
       { key: KEY2, name: "admin", admin: true },
     ],
-    prices: { "mock-fast": { inputPerMTok: 4, outputPerMTok: 20 } },
   });
 
   it("GET /v1/usage reports the caller's own tokens and cost", async () => {
@@ -66,7 +66,7 @@ describe("usage and budgets through the HTTP API", () => {
     expect(Object.keys(body.keys)).toEqual(["app1"]);
     expect(body.keys.app1.requests).toBe(1);
     expect(body.keys.app1.costUsd).toBeGreaterThan(0);
-    expect(body.keys.app1.budgetUsd).toBe(0.000001);
+    expect(body.keys.app1.budgetUsd).toBe(0.00006);
   });
 
   it("an admin key sees every key", async () => {
@@ -76,15 +76,20 @@ describe("usage and budgets through the HTTP API", () => {
     expect(Object.keys(res.json().keys).sort()).toEqual(["admin", "app1"]);
   });
 
-  it("returns 429 budget_exceeded once spend reaches the budget", async () => {
+  it("returns 429 budget_exceeded once the budget cannot cover another request", async () => {
     const app = makeApp({ config });
     const send = () =>
       app.inject({ method: "POST", url: "/v1/messages", headers: { "x-api-key": KEY }, payload: messageBody() });
-    expect((await send()).statusCode).toBe(200); // this one crosses the tiny budget
-    const blocked = await send();
-    expect(blocked.statusCode).toBe(429);
-    expect(blocked.json().error.type).toBe("budget_exceeded");
-    expect(blocked.json().error.message).toContain("budget");
+    const statuses: number[] = [];
+    let blocked;
+    for (let i = 0; i < 5 && !blocked; i++) {
+      const res = await send();
+      statuses.push(res.statusCode);
+      if (res.statusCode === 429) blocked = res;
+    }
+    expect(statuses).toEqual([200, 200, 429]);
+    expect(blocked!.json().error.type).toBe("budget_exceeded");
+    expect(blocked!.json().error.message).toContain("budget");
   });
 
   it("meters streamed responses when the stream ends", async () => {

@@ -7,7 +7,7 @@ import { runGuardrails, type Guardrail } from "./guardrails/guardrail.js";
 import { UsageMeter, costUsd } from "./metering.js";
 import type { ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
 import type { RateLimiter } from "./rate-limit/limiter.js";
-import type { Router } from "./router.js";
+import type { OpenStream, Routed, Router } from "./router.js";
 import type { Metrics } from "./telemetry/metrics.js";
 import { markSpanError } from "./telemetry/tracing.js";
 import { estimateTokens } from "./tokens.js";
@@ -107,7 +107,23 @@ export class Gateway {
 
   private async runComplete(key: VirtualKey, body: MessagesRequest, signal: AbortSignal): Promise<CompleteResult> {
     const startedAt = this.now();
-    const estimate = await this.admit(key, body); // steps 1-2
+    const admission = await this.admit(key, body); // steps 1-2
+    try {
+      return await this.serveComplete(key, body, signal, admission, startedAt);
+    } catch (err) {
+      this.deps.meter.release(key.name, admission.reservedUsd);
+      throw err;
+    }
+  }
+
+  /** Steps 3 to 8 of a JSON request. */
+  private async serveComplete(
+    key: VirtualKey,
+    body: MessagesRequest,
+    signal: AbortSignal,
+    admission: Admission,
+    startedAt: number,
+  ): Promise<CompleteResult> {
     const guarded = this.guardInput(body); // step 3
     const request = guarded.value;
 
@@ -116,7 +132,8 @@ export class Gateway {
     const cached = storeKey ? this.cache.get(storeKey) : undefined;
     if (storeKey) this.deps.metrics.cacheLookups.inc({ result: cached ? "hit" : "miss" });
     if (cached) {
-      await this.deps.limiter.reconcile(key, estimate, 0); // no upstream tokens were used
+      await this.deps.limiter.reconcile(key, admission.estimate, 0); // no upstream tokens were used
+      this.deps.meter.release(key.name, admission.reservedUsd);
       this.deps.meter.record(key.name, {
         model: cached.model,
         inputTokens: 0,
@@ -139,7 +156,7 @@ export class Gateway {
 
     if (storeKey) this.cache.set(storeKey, response); // step 7
     // Price by the configured target model: config validation guarantees it has a price.
-    await this.settle(key, estimate, target.model, value.inputTokens, value.outputTokens, startedAt); // step 8
+    await this.settle(key, admission, target.model, value.inputTokens, value.outputTokens, startedAt); // step 8
 
     return {
       response,
@@ -152,11 +169,18 @@ export class Gateway {
 
   private async runStream(key: VirtualKey, body: MessagesRequest, signal: AbortSignal, span: Span): Promise<StreamResult> {
     const startedAt = this.now();
-    const estimate = await this.admit(key, body);
-    const guarded = this.guardInput(body);
-    const request = guarded.value;
-
-    const routed = await this.track(key, () => this.deps.router.openStream(request.model, toUpstream(request), signal));
+    const admission = await this.admit(key, body);
+    let guardrailFindings: number;
+    let routed: Routed<OpenStream>;
+    try {
+      const guarded = this.guardInput(body);
+      guardrailFindings = guarded.findings;
+      const request = guarded.value;
+      routed = await this.track(key, () => this.deps.router.openStream(request.model, toUpstream(request), signal));
+    } catch (err) {
+      this.deps.meter.release(key.name, admission.reservedUsd);
+      throw err;
+    }
     const { target, attempts } = routed;
     const { start, rest } = routed.value;
     const ttftMs = this.now() - startedAt;
@@ -167,7 +191,7 @@ export class Gateway {
     // Latency for streams is measured to the end of the stream.
     const settle = (outputTokens: number) => {
       span.setAttribute("gateway.output_tokens", outputTokens);
-      return this.settle(key, estimate, target.model, start.inputTokens, outputTokens, startedAt);
+      return this.settle(key, admission, target.model, start.inputTokens, outputTokens, startedAt);
     };
     async function* chunks(): AsyncGenerator<StreamChunk> {
       let streamedText = "";
@@ -193,7 +217,7 @@ export class Gateway {
       }
     }
     span.setAttributes({ "gateway.cache": "SKIP", "gateway.attempts": attempts });
-    return { target, attempts, start, chunks: chunks(), guardrailFindings: guarded.findings };
+    return { target, attempts, start, chunks: chunks(), guardrailFindings };
   }
 
   /** Step 3. */
@@ -203,32 +227,63 @@ export class Gateway {
     return guarded;
   }
 
-  /** Steps 1 and 2. Returns the token estimate, so `settle` can reconcile it. */
-  private async admit(key: VirtualKey, body: MessagesRequest): Promise<number> {
-    const spent = this.deps.meter.spentUsd(key.name);
-    if (key.budgetUsd !== undefined && spent >= key.budgetUsd) {
-      throw new GatewayError(
-        429,
-        "budget_exceeded",
-        `Key "${key.name}" has spent $${spent.toFixed(6)} of its $${key.budgetUsd} budget`,
+  /**
+   * Steps 1 and 2. Returns what `settle` needs later: the token estimate (to
+   * reconcile the rate limit) and the budget reservation (to release).
+   *
+   * The budget check reserves the request's worst-case cost: estimated input
+   * plus `max_tokens` of output, at the most expensive model the alias may use.
+   * Concurrent requests see each other's reservations, so together they can
+   * never spend more than the budget. The check and the reservation happen
+   * with no `await` in between, so no other request can slip in.
+   */
+  private async admit(key: VirtualKey, body: MessagesRequest): Promise<Admission> {
+    const inputTokens = estimateTokens(promptText(body));
+    const estimate = inputTokens + body.max_tokens;
+    const { meter } = this.deps;
+
+    let reservedUsd = 0;
+    if (key.budgetUsd !== undefined) {
+      const worstCase = Math.max(
+        ...this.deps.router
+          .targetsFor(body.model)
+          .map((t) => costUsd(this.deps.config.prices, t.model, inputTokens, body.max_tokens)),
       );
+      const committed = meter.spentUsd(key.name) + meter.reservedUsd(key.name);
+      if (committed + worstCase > key.budgetUsd) {
+        const left = Math.max(0, key.budgetUsd - committed);
+        throw new GatewayError(
+          429,
+          "budget_exceeded",
+          `Key "${key.name}" has $${left.toFixed(6)} left of its $${key.budgetUsd} budget ` +
+            `(including requests in flight); this request may cost up to $${worstCase.toFixed(6)}`,
+        );
+      }
+      meter.reserve(key.name, worstCase);
+      reservedUsd = worstCase;
     }
-    const estimate = estimateRequestTokens(body);
-    await this.deps.limiter.check(key, estimate);
-    return estimate;
+
+    try {
+      await this.deps.limiter.check(key, estimate);
+    } catch (err) {
+      meter.release(key.name, reservedUsd);
+      throw err;
+    }
+    return { estimate, reservedUsd };
   }
 
-  /** Step 8. */
+  /** Step 8: reconcile the rate limit, swap the budget reservation for the real cost. */
   private async settle(
     key: VirtualKey,
-    estimate: number,
+    admission: Admission,
     model: string,
     inputTokens: number,
     outputTokens: number,
     startedAt: number,
   ): Promise<void> {
-    await this.deps.limiter.reconcile(key, estimate, inputTokens + outputTokens);
+    await this.deps.limiter.reconcile(key, admission.estimate, inputTokens + outputTokens);
     const cost = costUsd(this.deps.config.prices, model, inputTokens, outputTokens);
+    this.deps.meter.release(key.name, admission.reservedUsd);
     this.deps.meter.record(key.name, {
       model,
       inputTokens,
@@ -258,10 +313,15 @@ function spanAttributes(key: VirtualKey, body: MessagesRequest) {
   return { "gateway.key": key.name, "gateway.model": body.model, "gateway.stream": body.stream ?? false };
 }
 
-/** Input text plus the maximum output: a conservative guess before the call. */
-function estimateRequestTokens(body: MessagesRequest): number {
-  const input = [body.system ?? "", ...body.messages.map((m) => m.content)].join("\n");
-  return estimateTokens(input) + body.max_tokens;
+interface Admission {
+  /** Estimated tokens taken from the tokens-per-minute bucket: input estimate + max_tokens. */
+  estimate: number;
+  /** Worst-case USD reserved against the key's budget (0 without a budget). */
+  reservedUsd: number;
+}
+
+function promptText(body: MessagesRequest): string {
+  return [body.system ?? "", ...body.messages.map((m) => m.content)].join("\n");
 }
 
 function toUpstream(body: MessagesRequest): UpstreamRequest {

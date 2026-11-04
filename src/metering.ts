@@ -57,6 +57,21 @@ const zeroTotals = (): Totals => ({ requests: 0, inputTokens: 0, outputTokens: 0
  */
 export class UsageMeter {
   private readonly usage = new Map<string, KeyUsage>();
+  /** Worst-case cost of requests in flight, per key (see Gateway.admit). */
+  private readonly reserved = new Map<string, number>();
+
+  reserve(keyName: string, usd: number): void {
+    this.reserved.set(keyName, this.reservedUsd(keyName) + usd);
+  }
+
+  release(keyName: string, usd: number): void {
+    // Clamp at 0 so floating point leftovers never turn into negative reservations.
+    this.reserved.set(keyName, Math.max(0, this.reservedUsd(keyName) - usd));
+  }
+
+  reservedUsd(keyName: string): number {
+    return this.reserved.get(keyName) ?? 0;
+  }
 
   record(keyName: string, record: UsageRecord): void {
     const usage = this.forKey(keyName);
