@@ -12,12 +12,39 @@ import { perMinute } from "./token-bucket.js";
  * check an *estimate* up front and reconcile with the real count afterwards.
  * If the estimate was low the bucket can go negative, which makes the key
  * wait a little longer before its next request. Over time the limit holds.
+ *
+ * If the store itself fails (for example Redis is down), the limiter fails
+ * *open*: the request is allowed and the error is reported. A rate limiter
+ * outage should not become a full gateway outage.
  */
 export class RateLimiter {
-  constructor(private readonly store: RateLimitStore) {}
+  constructor(
+    private readonly store: RateLimitStore,
+    private readonly onStoreError: (err: unknown) => void = () => {},
+  ) {}
 
   /** Throws a 429 with `retry-after` if either limit is exhausted. */
   async check(key: VirtualKey, estimatedTokens: number): Promise<void> {
+    try {
+      await this.enforce(key, estimatedTokens);
+    } catch (err) {
+      if (err instanceof GatewayError) throw err;
+      this.onStoreError(err);
+    }
+  }
+
+  /** After the call: charge the difference between real and estimated tokens. */
+  async reconcile(key: VirtualKey, estimatedTokens: number, actualTokens: number): Promise<void> {
+    const limit = key.rateLimit?.tokensPerMinute;
+    if (limit === undefined || actualTokens === estimatedTokens) return;
+    try {
+      await this.store.consume(`${key.name}:tokens`, perMinute(limit), actualTokens - estimatedTokens);
+    } catch (err) {
+      this.onStoreError(err);
+    }
+  }
+
+  private async enforce(key: VirtualKey, estimatedTokens: number): Promise<void> {
     const limits = key.rateLimit;
     if (!limits) return;
 
@@ -36,13 +63,6 @@ export class RateLimiter {
       const result = await this.store.take(`${key.name}:tokens`, perMinute(limits.tokensPerMinute), estimatedTokens);
       if (!result.allowed) throw tooMany(key, "tokens per minute", result.retryAfterMs);
     }
-  }
-
-  /** After the call: charge the difference between real and estimated tokens. */
-  async reconcile(key: VirtualKey, estimatedTokens: number, actualTokens: number): Promise<void> {
-    const limit = key.rateLimit?.tokensPerMinute;
-    if (limit === undefined || actualTokens === estimatedTokens) return;
-    await this.store.consume(`${key.name}:tokens`, perMinute(limit), actualTokens - estimatedTokens);
   }
 }
 

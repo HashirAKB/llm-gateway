@@ -53,7 +53,7 @@ describe("Router fallback", () => {
     };
     const router = makeRouter({ flaky: counting, healthy: new MockProvider({ name: "healthy" }) });
     await router.complete("smart", req, signal); // 2 failures -> breaker opens
-    expect(router.breakerState("flaky")).toBe("open");
+    expect(router.breakerStates().flaky).toBe("open");
     const second = await router.complete("smart", req, signal);
     expect(flakyCalls).toBe(2); // not called again
     expect(second.target.provider).toBe("healthy");

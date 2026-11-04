@@ -31,6 +31,18 @@ export class ProviderError extends Error {
   }
 }
 
+/**
+ * The client disconnected, so the gateway stopped waiting for the upstream.
+ * Not retryable, and not counted against the provider's circuit breaker:
+ * the provider did nothing wrong.
+ */
+export class ClientAbortedError extends ProviderError {
+  constructor() {
+    super("client disconnected before the upstream replied", undefined, false);
+    this.name = "ClientAbortedError";
+  }
+}
+
 /** HTTP statuses worth retrying: request timeout, conflict, rate limit, server errors, overloaded. */
 export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 409 || status === 429 || status >= 500;

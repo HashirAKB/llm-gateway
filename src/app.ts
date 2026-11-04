@@ -5,7 +5,7 @@ import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
-import { GatewayError, ProviderError } from "./errors.js";
+import { ClientAbortedError, GatewayError, ProviderError } from "./errors.js";
 import { Gateway, type StreamResult } from "./gateway.js";
 import type { Guardrail } from "./guardrails/guardrail.js";
 import { PiiRedactionGuardrail } from "./guardrails/pii.js";
@@ -82,7 +82,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const gateway = new Gateway({
     config,
     router,
-    limiter: new RateLimiter(rateLimitStore),
+    limiter: new RateLimiter(rateLimitStore, (err) => app.log.warn({ err }, "rate limit store failed; allowing request")),
     meter,
     guardrails,
     metrics,
@@ -101,6 +101,11 @@ export function buildApp(options: AppOptions): FastifyInstance {
   app.setErrorHandler((err, request, reply) => {
     if (err instanceof GatewayError) {
       return reply.code(err.statusCode).headers(err.headers).send(errorBody(err.type, err.message));
+    }
+    if (err instanceof ClientAbortedError) {
+      // Nobody is listening any more; 499 is the conventional "client closed request" status.
+      request.log.info("client disconnected");
+      return reply.code(499).send(errorBody("api_error", err.message));
     }
     if (err instanceof ProviderError) {
       request.log.warn({ err }, "upstream failed");
@@ -248,6 +253,10 @@ async function sendStream(request: FastifyRequest, reply: FastifyReply, result: 
       }
     }
   } catch (err) {
+    if (err instanceof ClientAbortedError || res.destroyed) {
+      request.log.info("client disconnected mid-stream");
+      return;
+    }
     request.log.warn({ err }, "upstream failed mid-stream");
     writeSse(res, "error", errorBody("api_error", "Upstream failed mid-stream"));
   }

@@ -140,6 +140,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 - **Provider interface with a mock as default** ([ADR 0001](docs/adr/0001-provider-interface-and-mock-first.md)). Everything is testable offline. The cost: SSE is re-rendered from provider-neutral chunks, so only text content is supported.
 - **Resilience order is fallback > retry > breaker > timeout** ([ADR 0002](docs/adr/0002-resilience-layering.md)). An opening breaker immediately stops retries and moves to the next target. Only retryable errors count against the breaker.
 - **Streams can only be retried before the first byte.** After that, a failure is an SSE `error` event, because sent bytes cannot be taken back.
+- **Client disconnects are not upstream failures.** They cancel the upstream call, are never retried, and never count against a circuit breaker.
 - **Rate limits check an estimate, then reconcile** ([ADR 0003](docs/adr/0003-token-bucket-rate-limits.md)). Exact real token counts are only known after the call. The bucket can go negative, which keeps the long-run rate correct.
 - **The Redis store runs the token bucket in Lua** for atomicity across instances, with Redis `TIME` as the shared clock.
 - **The cache is exact-match, per tenant, temperature 0 only** ([ADR 0004](docs/adr/0004-exact-match-cache.md)). Safe by default; lower hit rate than a shared or semantic cache.
@@ -153,6 +154,8 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 - Virtual keys live in plaintext in `config/gateway.json` (demo keys). No key management API.
 - Usage, budgets, cache and circuit breakers are in memory and per process. Only rate limits can be shared, via Redis. A restart resets spend, so budgets are not durable.
 - Under concurrency a key can exceed its budget by the cost of its in-flight requests.
+- If Redis is unreachable, rate limits fail open (requests are allowed and a warning is logged).
+- Streams cut off midway are metered from an estimate of the text already sent, not from provider-reported usage.
 - PII redaction is regex-based: emails and 10 to 15 digit phone numbers only. It misses names, addresses and unusual formats. Output guardrails do not run on streams.
 - Token estimates before the call use 4 characters per token. Real counts come from the provider afterwards.
 - `temperature` is used for cache decisions but not forwarded to Anthropic, because current Claude models reject sampling parameters.

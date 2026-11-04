@@ -110,3 +110,22 @@ Decisions made while building without the owner available. Each entry: decision,
 
 ## D23. `/metrics` is unauthenticated
 - **Why:** this is the usual setup for a scrape endpoint on an internal network. It contains key names and model names, but no secrets or prompts. In production it would sit on a separate internal port.
+
+## D24. Client disconnects are their own error type
+- **Decision:** when the client's signal aborts, `withTimeout` throws `ClientAbortedError` (non-retryable) whatever the provider threw while being cancelled. It is not retried, does not count against the breaker, stops fallback, and is logged at info level with status 499.
+- **Alternatives:** let the provider's abort error flow through.
+- **Why:** found in review. Before the fix, a disconnect surfaced as an unhandled 500 (mock) or as a *retryable* error that was retried and counted against the provider's breaker (Anthropic SDK). Clients hanging up could have opened the circuit for everyone.
+
+## D25. Partial streams are metered from the text already streamed
+- **Decision:** if a stream ends without its `end` chunk (upstream failure or client disconnect), usage is recorded with output tokens estimated from the streamed text.
+- **Alternatives:** record nothing (the original behaviour).
+- **Why:** the provider bills for what it generated. Recording nothing would let interrupted streams escape budgets and cost reports.
+
+## D26. Rate limiting fails open when its store is down
+- **Decision:** if the rate-limit store throws (for example Redis is unreachable), the request is allowed and a warning is logged.
+- **Alternatives:** fail closed (reject all traffic).
+- **Why:** a Redis outage should not turn into a full gateway outage. Budgets still apply, because they are tracked in process. This is a policy choice; a stricter deployment could flip it.
+
+## D27. Fallback metric counts only real fallbacks
+- **Decision:** `gateway_fallbacks_total` increments only when another target follows the failed one.
+- **Why:** found in review: the last target's failure was counted as a "fallback" that never happened.

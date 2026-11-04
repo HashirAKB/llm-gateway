@@ -29,6 +29,7 @@ export interface RouterHooks {
   tracer?: Tracer;
   onAttemptError?: (target: Target, err: ProviderError) => void;
   onRetry?: (target: Target) => void;
+  /** Called when a target is abandoned and another target will be tried. */
   onFallback?: (failed: Target, err: ProviderError) => void;
 }
 
@@ -73,11 +74,7 @@ export class Router {
     return available;
   }
 
-  breakerState(provider: string): BreakerState {
-    return this.breaker(provider).state;
-  }
-
-  /** States of every breaker created so far, for the metrics gauge. */
+  /** States of every breaker created so far (a breaker is created on first use). */
   breakerStates(): Record<string, BreakerState> {
     return Object.fromEntries([...this.breakers].map(([name, breaker]) => [name, breaker.state]));
   }
@@ -112,7 +109,8 @@ export class Router {
     const failures: string[] = [];
     let attempts = 0;
 
-    for (const target of this.targetsFor(alias)) {
+    const targets = this.targetsFor(alias);
+    for (const [index, target] of targets.entries()) {
       const provider = this.providers.get(target.provider)!;
       const breaker = this.breaker(target.provider);
       try {
@@ -136,7 +134,7 @@ export class Router {
         if (!(err instanceof ProviderError)) throw err; // a bug, not an upstream failure
         if (signal.aborted) throw err; // the client is gone; stop trying
         failures.push(`${target.provider}/${target.model}: ${err.message}`);
-        this.hooks.onFallback?.(target, err);
+        if (index < targets.length - 1) this.hooks.onFallback?.(target, err);
       }
     }
     throw new GatewayError(502, "api_error", `All upstream targets failed. ${failures.join("; ")}`);

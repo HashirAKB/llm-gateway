@@ -134,6 +134,7 @@ export class Gateway {
 
     // Step 6.
     const output = runGuardrails(this.deps.guardrails, "after", toMessagesResponse(value));
+    this.deps.metrics.guardrailFindings.inc(output.findings);
     const response = output.value;
 
     if (storeKey) this.cache.set(storeKey, response); // step 7
@@ -159,23 +160,32 @@ export class Gateway {
     const { target, attempts } = routed;
     const { start, rest } = routed.value;
 
-    // Wrap the upstream iterator so accounting happens when the `end` chunk passes through.
+    // Wrap the upstream iterator so accounting happens when the stream finishes.
     // Latency for streams is measured to the end of the stream.
-    const settle = (outputTokens: number) =>
-      this.settle(key, estimate, target.model, start.inputTokens, outputTokens, startedAt);
+    const settle = (outputTokens: number) => {
+      span.setAttribute("gateway.output_tokens", outputTokens);
+      return this.settle(key, estimate, target.model, start.inputTokens, outputTokens, startedAt);
+    };
     async function* chunks(): AsyncGenerator<StreamChunk> {
+      let streamedText = "";
+      let settled = false;
       try {
         for (let next = await rest.next(); !next.done; next = await rest.next()) {
-          if (next.value.type === "end") {
-            await settle(next.value.outputTokens);
-            span.setAttribute("gateway.output_tokens", next.value.outputTokens);
+          const chunk = next.value;
+          if (chunk.type === "text") streamedText += chunk.text;
+          if (chunk.type === "end") {
+            settled = true;
+            await settle(chunk.outputTokens);
           }
-          yield next.value;
+          yield chunk;
         }
       } catch (err) {
         markSpanError(span, err);
         throw err;
       } finally {
+        // The upstream failed or the client left midway. The provider still billed
+        // for what it generated, so record an estimate from the text we saw.
+        if (!settled) await settle(estimateTokens(streamedText));
         span.end();
       }
     }

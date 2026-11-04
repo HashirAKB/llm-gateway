@@ -28,7 +28,7 @@ If a provider is overloaded and every client retries immediately, the retries ma
 
 ### 1.6 Timeouts and AbortSignal
 
-Without a deadline, a hung upstream holds a connection and a client forever. `withTimeout` (`src/resilience/timeout.ts`) races the call against a timer and, when the timer wins, *aborts* the call through an `AbortSignal`. Aborting matters: it actually cancels the HTTP request or the mock's sleep, instead of letting the work continue in the background. The same signal is also aborted when the client disconnects (`abortOnClientClose` in `src/app.ts`).
+Without a deadline, a hung upstream holds a connection and a client forever. `withTimeout` (`src/resilience/timeout.ts`) races the call against a timer and, when the timer wins, *aborts* the call through an `AbortSignal`. Aborting matters: it actually cancels the HTTP request or the mock's sleep, instead of letting the work continue in the background. The same signal is also aborted when the client disconnects (`abortOnClientClose` in `src/app.ts`). In that case `withTimeout` throws a `ClientAbortedError`: it is not retryable and does not count against the circuit breaker, because the provider did nothing wrong. Getting this wrong would let clients that hang up open the circuit for everyone.
 
 ### 1.7 Circuit breaker
 
