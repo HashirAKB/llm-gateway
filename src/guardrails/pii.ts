@@ -36,8 +36,8 @@ export function redactPii(text: string): { text: string; count: number } {
  * gateway. Regexes are a baseline, not a guarantee: they miss PII written in
  * unusual formats and cannot catch names or addresses.
  */
-export class PiiRedactionGuardrail implements Guardrail {
-  readonly name = "pii-redaction";
+export class PiiInputRedaction implements Guardrail {
+  readonly name = "pii-input-redaction";
 
   before(req: MessagesRequest): GuardrailOutcome<MessagesRequest> {
     let findings = 0;
@@ -52,5 +52,15 @@ export class PiiRedactionGuardrail implements Guardrail {
       messages: req.messages.map((m) => ({ ...m, content: redact(m.content) })),
     };
     return { value, findings };
+  }
+}
+
+/** Redacts PII the model writes in its reply, for JSON and streamed responses. */
+export class PiiOutputRedaction implements Guardrail {
+  readonly name = "pii-output-redaction";
+
+  afterText(text: string): GuardrailOutcome<string> {
+    const result = redactPii(text);
+    return { value: result.text, findings: result.count };
   }
 }

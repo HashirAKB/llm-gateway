@@ -32,7 +32,7 @@ Request flow, in order (see `src/gateway.ts`):
 1. **Auth**: the virtual key in `Authorization: Bearer` or `x-api-key` is hashed and matched against configured tenants. Config stores only SHA-256 hashes (`npm run hash-key -- <secret>`).
 2. **Budget**: the request's worst-case cost is reserved against the key's `budgetUsd`; if spend plus in-flight reservations plus this request could exceed it, the answer is `429 budget_exceeded`.
 3. **Rate limit**: requests/min and tokens/min token buckets per key, in memory or in Redis.
-4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`.
+4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`. Optionally the same is applied to replies, including streams.
 5. **Cache**: identical deterministic requests are answered from memory.
 6. **Route**: the alias (`fast`, `smart`) maps to an ordered list of provider models. Each target is wrapped in timeout, circuit breaker and retry with backoff and jitter; on failure the next target is tried.
 7. **Settle**: real token usage reconciles the rate limit and is priced from the price table.
@@ -156,7 +156,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 - Usage, budgets, cache and circuit breakers are in memory and per process. Only rate limits can be shared, via Redis. A restart resets spend, so budgets are not durable.
 - If Redis is unreachable, rate limits fail open (requests are allowed and a warning is logged).
 - Streams cut off midway are metered from an estimate of the text already sent, not from provider-reported usage.
-- PII redaction is regex-based: emails and 10 to 15 digit phone numbers only. It misses names, addresses and unusual formats. Output guardrails do not run on streams.
+- PII redaction is regex-based: emails and 10 to 15 digit phone numbers only. It misses names, addresses and unusual formats. Redacting replies (`piiRedactionOutput`) is opt-in; on streams it releases text a word at a time.
 - Token estimates before the call use 4 characters per token. Real counts come from the provider afterwards.
 - `temperature` is used for cache decisions but not forwarded to Anthropic, because current Claude models reject sampling parameters.
 - `/metrics` and `/dashboard` are unauthenticated (the dashboard's data endpoint needs an admin key).
@@ -164,9 +164,8 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
-2. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
-3. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
+1. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
+2. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
 
 ## Project layout
 
@@ -180,7 +179,7 @@ src/
   rate-limit/          token-bucket.ts (pure math), store.ts, redis-store.ts, limiter.ts
   cache.ts             cache policy, normalised key, TTL + LRU store
   metering.ts          prices, usage ledger, percentiles
-  guardrails/          guardrail.ts (interface), pii.ts
+  guardrails/          guardrail.ts (interface), pii.ts, stream.ts (chunk-safe output guard)
   providers/           provider.ts (interface), mock.ts, anthropic.ts
   telemetry/           metrics.ts (Prometheus), tracing.ts (OpenTelemetry)
 public/dashboard.html  static dashboard

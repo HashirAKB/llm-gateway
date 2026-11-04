@@ -4,6 +4,7 @@ import { ResponseCache, cacheKey, isCacheable } from "./cache.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { GatewayError } from "./errors.js";
 import { runGuardrails, type Guardrail } from "./guardrails/guardrail.js";
+import { StreamTextGuard } from "./guardrails/stream.js";
 import { UsageMeter, costUsd } from "./metering.js";
 import type { ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
 import type { RateLimiter } from "./rate-limit/limiter.js";
@@ -52,7 +53,7 @@ export interface GatewayDeps {
  *   3. guard input   pre-request guardrails, e.g. PII redaction
  *   4. cache lookup  deterministic, non-streaming requests only
  *   5. route         alias -> provider call, with retries, timeouts, breaker, fallback
- *   6. guard output  post-response guardrails (non-streaming)
+ *   6. guard output  post-response guardrails on the reply text (streams: piece by piece)
  *   7. cache store
  *   8. settle        reconcile the token rate limit, record tokens, cost and latency
  *
@@ -150,9 +151,9 @@ export class Gateway {
     const { value, target, attempts } = routed;
 
     // Step 6.
-    const output = runGuardrails(this.deps.guardrails, "after", toMessagesResponse(value));
+    const output = runGuardrails(this.deps.guardrails, "afterText", value.text);
     this.deps.metrics.guardrailFindings.inc(output.findings);
-    const response = output.value;
+    const response = toMessagesResponse({ ...value, text: output.value });
 
     if (storeKey) this.cache.set(storeKey, response); // step 7
     // Price by the configured target model: config validation guarantees it has a price.
@@ -193,14 +194,27 @@ export class Gateway {
       span.setAttribute("gateway.output_tokens", outputTokens);
       return this.settle(key, admission, target.model, start.inputTokens, outputTokens, startedAt);
     };
+    // Step 6 for streams: output guardrails see text in boundary-safe pieces.
+    const outputGuard = this.deps.guardrails.some((g) => g.afterText)
+      ? new StreamTextGuard(this.deps.guardrails)
+      : undefined;
+    const countFindings = () => this.deps.metrics.guardrailFindings.inc(outputGuard?.findings ?? 0);
     async function* chunks(): AsyncGenerator<StreamChunk> {
       let streamedText = "";
       let settled = false;
       try {
         for (let next = await rest.next(); !next.done; next = await rest.next()) {
           const chunk = next.value;
-          if (chunk.type === "text") streamedText += chunk.text;
+          if (chunk.type === "text") {
+            streamedText += chunk.text; // metering counts what the provider generated
+            const text = outputGuard ? outputGuard.push(chunk.text) : chunk.text;
+            if (text) yield { type: "text", text };
+            continue;
+          }
           if (chunk.type === "end") {
+            const held = outputGuard?.flush();
+            if (held) yield { type: "text", text: held };
+            countFindings();
             settled = true;
             await settle(chunk.outputTokens);
           }

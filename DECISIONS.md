@@ -75,7 +75,7 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** config fails to load if any route target model has no price. Cost is computed from the configured target model, not the model string the provider echoes back.
 - **Why:** a missing price would otherwise surface as a runtime error (or silent $0) on the first request.
 
-## D16. Guardrails: synchronous before/after hooks; `after` runs on JSON replies only
+## D16. Guardrails: synchronous before/after hooks; `after` runs on JSON replies only (superseded by D32)
 - **Decision:** `Guardrail { before?(request), after?(response) }`, run in order. Streams get `before` only.
 - **Alternatives:** async hooks; chunk-aware output hooks for streams.
 - **Why:** the one real guardrail (regex PII redaction) is synchronous and acts on input. Scanning streamed output needs buffering across chunk boundaries; noted as a limitation.
@@ -148,3 +148,8 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** admission reserves `cost(estimated input, max_tokens)` at the most expensive model the alias can route to, and refuses the request if `spent + reserved + worstCase > budget`. Settlement releases the reservation and records the real cost; any failure path releases it too. Check and reservation happen synchronously, with no `await` between them.
 - **Alternatives:** check spend only (D14, allowed overshoot under concurrency); reserve at the first target's price (cheaper, but fallback to a pricier model could overshoot).
 - **Why:** the budget is advertised as hard. Reserving the worst case is the simplest rule that makes it hold for concurrent traffic. The cost is conservatism near the limit.
+
+## D32. Output guardrails work on text, and on streams via safe boundaries
+- **Decision:** the output hook is `afterText(text)`, used for JSON replies and streams. For streams, `StreamTextGuard` releases text only up to the last "whitespace then letter" point (or when 1024 characters are held). Output PII redaction is a separate, opt-in setting (`piiRedactionOutput`). Metering still counts the provider's original text.
+- **Alternatives:** buffer the whole stream (defeats streaming); a fixed-size hold-back window (a cut can still land inside a match); per-chunk redaction (misses split matches).
+- **Why:** the boundary rule is provably safe for the patterns we redact and adds only one word of delay. It is opt-in because it changes streaming granularity.

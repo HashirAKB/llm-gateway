@@ -64,7 +64,9 @@ Providers price input and output tokens separately, per million tokens. `costUsd
 
 ### 1.15 Guardrails
 
-A guardrail is a hook that inspects or rewrites traffic: `before` on the request, `after` on the response (`src/guardrails/guardrail.ts`). The example redacts emails and phone numbers before a prompt leaves the company (`src/guardrails/pii.ts`). It runs before the cache, so the cache key and the cached entry never contain the raw PII.
+A guardrail is a hook that inspects or rewrites traffic: `before` on the request, `afterText` on the reply text (`src/guardrails/guardrail.ts`). The example redacts emails and phone numbers before a prompt leaves the company (`PiiInputRedaction` in `src/guardrails/pii.ts`). It runs before the cache, so the cache key and the cached entry never contain the raw PII.
+
+Output guardrails on *streams* are harder: an email can arrive split across two chunks (`jane@exa` + `mple.com`), and a per-chunk regex would miss it. `StreamTextGuard` (`src/guardrails/stream.ts`) holds text back and releases it only up to the last whitespace followed by a letter. No email or phone number can span such a point, so redacting the released piece is exactly as good as redacting the whole reply. The cost is that each word is sent when the next one starts.
 
 ### 1.16 Observability: logs, metrics, traces
 
@@ -92,7 +94,7 @@ Read in this order. Each file is small; the comment at the top of each says what
 | 12 | `src/rate-limit/limiter.ts` | Two buckets per key; estimate then reconcile. |
 | 13 | `src/cache.ts` | Cache policy, normalised keys, TTL, a tiny LRU on top of `Map`. |
 | 14 | `src/metering.ts` | Prices, the usage ledger, nearest-rank percentiles. |
-| 15 | `src/guardrails/guardrail.ts` and `pii.ts` | A plugin interface and a readable regex approach. |
+| 15 | `src/guardrails/guardrail.ts`, `pii.ts`, `stream.ts` | A plugin interface, a readable regex approach, and how to apply it safely to a stream. |
 | 16 | `src/gateway.ts` | The pipeline: every step above, in order, in one place. |
 | 17 | `src/telemetry/metrics.ts` and `tracing.ts` | Prometheus metric types; OpenTelemetry tracer setup and exporters. |
 | 18 | `src/auth.ts` and `src/app.ts` | The HTTP layer: auth hook, routes, SSE rendering, request ids, logs. |
@@ -120,7 +122,7 @@ Assume no `ANTHROPIC_API_KEY`, so `smart` resolves to its only registered target
 8. **Cache lookup.** `isCacheable` is true (not streaming, temperature 0). `cacheKey("app1", redactedRequest)` hashes the normalised request. First time: a miss, `gateway_cache_lookups_total{result="miss"}` goes up.
 9. **Routing.** `Router.complete("smart", ...)` calls `withFallback`. `targetsFor("smart")` drops the two `anthropic` targets (not registered) and returns `[mock/mock-smart]`.
 10. **Resilience.** For that target: `retry` calls `breaker.execute` (closed, so it runs) which calls `attempt` (opens an `upstream.attempt` child span) which calls `withTimeout` (30s deadline) which calls `MockProvider.complete`. The mock sleeps 50ms on the abortable signal, rolls its seeded random number against `errorRate` 0, and returns the reply with token counts. The breaker records a success, the span ends.
-11. **Response guardrails.** `runGuardrails(..., "after", ...)` runs; the PII guardrail has no `after` hook, so nothing changes.
+11. **Response guardrails.** `runGuardrails(..., "afterText", ...)` runs on the reply text. Output redaction is off in the default config (`piiRedactionOutput: false`), so nothing changes.
 12. **Cache store.** The response is stored under the cache key with a 5-minute TTL.
 13. **Settle.** `Gateway.settle` reconciles the tokens bucket (real total tokens minus the 107 estimate is refunded), releases the $0.002 budget reservation, prices the call with `costUsd(prices, "mock-smart", input, output)`, records it in `UsageMeter`, and increments `gateway_tokens_total` and `gateway_cost_usd_total`.
 14. **Span attributes.** Back in `gateway.complete`, the span gets `gateway.cache=MISS`, `gateway.attempts=1`, the output token count, and ends.

@@ -75,7 +75,10 @@ export const ConfigSchema = z
     prices: z.record(z.string(), PriceSchema),
     guardrails: z
       .object({
-        piiRedaction: z.boolean().default(true),
+        /** Redact emails and phone numbers in prompts before they reach a provider. */
+      piiRedaction: z.boolean().default(true),
+      /** Also redact them in replies. Off by default: streams are then released word by word. */
+      piiRedactionOutput: z.boolean().default(false),
       })
       .prefault({}),
     cache: z

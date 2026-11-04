@@ -9,7 +9,7 @@ import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { ClientAbortedError, GatewayError, ProviderError } from "./errors.js";
 import { Gateway, type StreamResult } from "./gateway.js";
 import type { Guardrail } from "./guardrails/guardrail.js";
-import { PiiRedactionGuardrail } from "./guardrails/pii.js";
+import { PiiInputRedaction, PiiOutputRedaction } from "./guardrails/pii.js";
 import { UsageMeter } from "./metering.js";
 import type { Provider } from "./providers/provider.js";
 import { RateLimiter } from "./rate-limit/limiter.js";
@@ -79,7 +79,9 @@ export function buildApp(options: AppOptions): FastifyInstance {
     onFallback: (t) => metrics.fallbacks.inc({ provider: t.provider, model: t.model }),
   });
   const meter = new UsageMeter();
-  const guardrails: Guardrail[] = config.guardrails.piiRedaction ? [new PiiRedactionGuardrail()] : [];
+  const guardrails: Guardrail[] = [];
+  if (config.guardrails.piiRedaction) guardrails.push(new PiiInputRedaction());
+  if (config.guardrails.piiRedactionOutput) guardrails.push(new PiiOutputRedaction());
   const gateway = new Gateway({
     config,
     router,

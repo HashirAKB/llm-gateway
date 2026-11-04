@@ -10,7 +10,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 - Per-key token-bucket rate limits for requests/min and tokens/min, with an in-memory store and an atomic Redis (Lua) store that pass the same contract tests.
 - An exact-match response cache with TTL and LRU eviction, keyed on a normalised request hash, scoped per tenant, limited to deterministic non-streaming requests.
 - Cost metering from a price table, `GET /v1/usage`, and hard per-key budgets returning `429 budget_exceeded`, enforced under concurrency by reserving each request's worst-case cost.
-- A pluggable guardrail interface with a regex PII redactor for emails and phone numbers (toggleable).
+- A pluggable guardrail interface with a regex PII redactor for emails and phone numbers, on prompts and optionally on replies, including streams (redaction stays correct when a match is split across chunks).
 - Observability: one structured JSON log line per request with request ids, Prometheus `/metrics` (latency and time-to-first-token histograms, upstream failures, retries, fallbacks, cache lookups, tokens, cost, breaker state), and OpenTelemetry spans for each request and each upstream attempt.
 - A static dashboard showing usage, p50/p95 latency, cache hit rate, cost and budget use per key.
 - An autocannon load test with committed results, an offline demo script, Dockerfile, docker-compose (gateway, Redis, Jaeger, Prometheus), and CI running lint, typecheck, tests (with a Redis service) and a Docker build plus smoke test.
@@ -31,7 +31,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 - Text-only messages: no tool use, images or documents.
 - Keys live in the config file (hashed); there is no key management API.
 - Usage, budgets, cache and breakers are per process and in memory; a restart resets spend.
-- PII redaction is regex-based and input-only for streams.
+- PII redaction is regex-based (emails and phone numbers only).
 - Token estimates before a call use a 4 characters per token heuristic.
 
 ## Resume bullets
