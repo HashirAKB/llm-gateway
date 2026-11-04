@@ -12,11 +12,11 @@ Many LLM workloads repeat identical prompts (classification, templated questions
 - Cache only non-streaming requests at temperature 0. A missing temperature counts as the provider default (1). `cacheNonZeroTemperature` opts in to caching sampled replies.
 - The key is a SHA-256 over a normalised request: tenant (virtual key name), alias, trimmed system prompt, messages with trimmed content, `max_tokens`, temperature.
 - The key is computed after input guardrails, so the cache never stores raw PII from prompts.
-- Storage is an in-memory Map with a TTL and a max size, evicting least recently used entries.
+- Storage sits behind a `CacheStore` interface: an in-memory Map with a TTL and a max size (LRU eviction), or Redis with `SET ... PX` when `REDIS_URL` is set. Store errors are treated as misses.
 - A hit records zero cost and refunds the token-rate estimate, but still counts as a request.
 
 ## Consequences
 
 - In the load test with 100 distinct prompts, throughput rises from about 955 to about 8,200 requests/s and p50 drops from about 51ms to about 5ms.
 - Per-tenant scoping lowers the hit rate compared to a global cache.
-- The cache is per process and is lost on restart. Redis-backed or semantic caching are future options.
+- With the memory store the cache is per process and lost on restart; with Redis it is shared and survives gateway restarts. Semantic caching is a future option.

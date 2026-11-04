@@ -92,7 +92,7 @@ Read in this order. Each file is small; the comment at the top of each says what
 | 10 | `src/rate-limit/token-bucket.ts` | The algorithm as a pure function. |
 | 11 | `src/rate-limit/store.ts` and `redis-store.ts` | One interface, two stores; atomicity with Lua. |
 | 12 | `src/rate-limit/limiter.ts` | Two buckets per key; estimate then reconcile. |
-| 13 | `src/cache.ts` | Cache policy, normalised keys, TTL, a tiny LRU on top of `Map`. |
+| 13 | `src/cache.ts` and `src/redis-cache.ts` | Cache policy, normalised keys, TTL, a tiny LRU on top of `Map`, and the same interface over Redis. |
 | 14 | `src/metering.ts` | Prices, the usage ledger, nearest-rank percentiles. |
 | 15 | `src/guardrails/guardrail.ts`, `pii.ts`, `stream.ts` | A plugin interface, a readable regex approach, and how to apply it safely to a stream. |
 | 16 | `src/gateway.ts` | The pipeline: every step above, in order, in one place. |
@@ -123,7 +123,7 @@ Assume no `ANTHROPIC_API_KEY`, so `smart` resolves to its only registered target
 9. **Routing.** `Router.complete("smart", ...)` calls `withFallback`. `targetsFor("smart")` drops the two `anthropic` targets (not registered) and returns `[mock/mock-smart]`.
 10. **Resilience.** For that target: `retry` calls `breaker.execute` (closed, so it runs) which calls `attempt` (opens an `upstream.attempt` child span) which calls `withTimeout` (30s deadline) which calls `MockProvider.complete`. The mock sleeps 50ms on the abortable signal, rolls its seeded random number against `errorRate` 0, and returns the reply with token counts. The breaker records a success, the span ends.
 11. **Response guardrails.** `runGuardrails(..., "afterText", ...)` runs on the reply text. Output redaction is off in the default config (`piiRedactionOutput: false`), so nothing changes.
-12. **Cache store.** The response is stored under the cache key with a 5-minute TTL.
+12. **Cache store.** The response is stored under the cache key with a 5-minute TTL (in memory here; in Redis when `REDIS_URL` is set).
 13. **Settle.** `Gateway.settle` reconciles the tokens bucket (real total tokens minus the 107 estimate is refunded), releases the $0.002 budget reservation, prices the call with `costUsd(prices, "mock-smart", input, output)`, records it in `UsageMeter`, and increments `gateway_tokens_total` and `gateway_cost_usd_total`.
 14. **Span attributes.** Back in `gateway.complete`, the span gets `gateway.cache=MISS`, `gateway.attempts=1`, the output token count, and ends.
 15. **HTTP response.** The handler sets `x-gateway-cache: MISS`, `x-gateway-redactions: 1`, `x-gateway-provider: mock`, `x-gateway-model: mock-smart`, `x-gateway-attempts: 1`, and sends the Messages-style JSON.
@@ -176,7 +176,7 @@ Every distinct label value creates a new time series. Request ids are unbounded,
 Inject the clock and the randomness. `CircuitBreaker` takes `now`, `retry` takes `sleep` and `random`, `MemoryRateLimitStore` takes `now`, `MockProvider` takes a seeded `random`. Tests advance a fake clock by exact milliseconds. Only a few small integration tests use real short timers, such as the timeout test.
 
 **15. What would change to run this with many instances behind a load balancer?**
-Rate limits already work across instances via Redis. Still per instance: the response cache, the usage ledger (so budgets), and circuit breakers. I would move cache and usage to Redis (usage as atomic `INCRBYFLOAT` per key), and accept per-instance breakers since each instance learns about an outage within a few requests anyway. Sticky sessions are not needed because no per-client state remains in the process.
+Rate limits already work across instances via Redis. The response cache is shared through Redis too (`RedisCacheStore`). Still per instance: the usage ledger (so budgets) and circuit breakers. I would move spend and reservations to Redis with a Lua script, so the check-and-reserve stays atomic across instances, and accept per-instance breakers since each instance learns about an outage within a few requests anyway. Sticky sessions are not needed because no per-client state remains in the process.
 
 ## Part 5. Hands-on exercises
 
@@ -213,8 +213,8 @@ Add a `gateway_stream_output_tokens_per_second` histogram: output tokens divided
 
 *Hint:* `gateway_time_to_first_token_seconds` (in `Gateway.runStream`) already shows where the first chunk is timed. Record the end time inside the `chunks` generator when the `end` chunk arrives, and assert on `/metrics` the way `test/streaming-timeouts.test.ts` does.
 
-### Exercise 5. Make the cache shared (extend it)
+### Exercise 5. Let clients bypass the cache (extend it)
 
-Introduce a `CacheStore` interface with `get` and `set`, keep `ResponseCache` as the memory implementation, and add a Redis implementation using `SET key value PX ttl`.
+Support a `cache-control: no-cache` request header: the gateway skips the cache lookup but still stores the fresh reply, and answers with `x-gateway-cache: BYPASS`.
 
-*Hint:* copy the pattern of `RateLimitStore` and its contract tests in `test/rate-limit.test.ts`. Decide what happens to LRU eviction in Redis (look up `maxmemory-policy allkeys-lru`) and write the decision down.
+*Hint:* the decision belongs next to `isCacheable` in `src/cache.ts`, but the header lives in `src/app.ts`, so pass a flag into `Gateway.complete`. Add `"BYPASS"` to `CacheStatus`, then write the HTTP test first, modelled on "serves an identical deterministic request from cache" in `test/cache.test.ts`.

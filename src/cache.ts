@@ -42,6 +42,13 @@ export function cacheKey(keyName: string, body: MessagesRequest): string {
   return createHash("sha256").update(JSON.stringify(normalised)).digest("hex");
 }
 
+/** Where cached replies live: in process memory, or in Redis to share them across instances. */
+export interface CacheStore {
+  get(key: string): Promise<MessagesResponse | undefined>;
+  set(key: string, value: MessagesResponse): Promise<void>;
+  close(): Promise<void>;
+}
+
 interface Entry {
   value: MessagesResponse;
   expiresAt: number;
@@ -52,7 +59,7 @@ interface Entry {
  * A Map iterates in insertion order, so deleting and re-inserting on read
  * makes the first key the least recently used one: a tiny LRU.
  */
-export class ResponseCache {
+export class MemoryCacheStore implements CacheStore {
   private readonly entries = new Map<string, Entry>();
 
   constructor(
@@ -60,7 +67,7 @@ export class ResponseCache {
     private readonly now: () => number = Date.now,
   ) {}
 
-  get(key: string): MessagesResponse | undefined {
+  async get(key: string): Promise<MessagesResponse | undefined> {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     this.entries.delete(key);
@@ -69,7 +76,7 @@ export class ResponseCache {
     return entry.value;
   }
 
-  set(key: string, value: MessagesResponse): void {
+  async set(key: string, value: MessagesResponse): Promise<void> {
     this.entries.delete(key);
     this.entries.set(key, { value, expiresAt: this.now() + this.config.ttlMs });
     if (this.entries.size > this.config.maxEntries) {
@@ -78,7 +85,5 @@ export class ResponseCache {
     }
   }
 
-  get size(): number {
-    return this.entries.size;
-  }
+  async close(): Promise<void> {}
 }

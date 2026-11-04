@@ -153,3 +153,12 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** the output hook is `afterText(text)`, used for JSON replies and streams. For streams, `StreamTextGuard` releases text only up to the last "whitespace then letter" point (or when 1024 characters are held). Output PII redaction is a separate, opt-in setting (`piiRedactionOutput`). Metering still counts the provider's original text.
 - **Alternatives:** buffer the whole stream (defeats streaming); a fixed-size hold-back window (a cut can still land inside a match); per-chunk redaction (misses split matches).
 - **Why:** the boundary rule is provably safe for the patterns we redact and adds only one word of delay. It is opt-in because it changes streaming granularity.
+
+## D33. Cache behind a store interface; Redis shares it; failures are misses
+- **Decision:** `CacheStore { get, set, close }` with `MemoryCacheStore` (TTL + LRU) and `RedisCacheStore` (`SET ... PX`, JSON values). The server uses Redis for the cache whenever `REDIS_URL` is set. Any store error is logged and treated as a miss.
+- **Alternatives:** a size cap enforced by the gateway in Redis; failing the request on cache errors.
+- **Why:** the cache is an optimisation, so it must never cause an outage. Redis already has a correct, fast LRU (`maxmemory-policy allkeys-lru`), so re-implementing one on top would add code and round trips.
+
+## D34. Splitting the "move cache and usage to Redis" item
+- **Decision:** shipped the shared cache first; durable budgets in Redis is the next item.
+- **Why:** the cache is a simple key-value move. Budgets need an atomic check-and-reserve across instances (a Lua script) and a decision about what the usage report shows when spend is global but latency data is per instance. Separate commits keep each change reviewable.

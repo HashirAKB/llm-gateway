@@ -1,6 +1,8 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import type { MessagesRequest, MessagesResponse } from "../src/api.js";
-import { ResponseCache, cacheKey, isCacheable } from "../src/cache.js";
+import { MemoryCacheStore, cacheKey, isCacheable, type CacheStore } from "../src/cache.js";
+import { RedisCacheStore } from "../src/redis-cache.js";
 import { KEY, KEY2, makeApp, messageBody, testConfig } from "./helpers.js";
 
 const config = { enabled: true, ttlMs: 1000, maxEntries: 2, cacheNonZeroTemperature: false };
@@ -47,26 +49,73 @@ describe("cacheKey", () => {
   });
 });
 
-describe("ResponseCache", () => {
-  it("expires entries after the TTL", () => {
+describe("MemoryCacheStore", () => {
+  it("expires entries after the TTL", async () => {
     let now = 0;
-    const cache = new ResponseCache(config, () => now);
-    cache.set("k", reply("a"));
+    const cache = new MemoryCacheStore(config, () => now);
+    await cache.set("k", reply("a"));
     now = 999;
-    expect(cache.get("k")).toBeDefined();
+    expect(await cache.get("k")).toBeDefined();
     now = 1999; // read at 999 does not extend the TTL beyond set time + ttl
-    expect(cache.get("k")).toBeUndefined();
+    expect(await cache.get("k")).toBeUndefined();
   });
 
-  it("evicts the least recently used entry when full", () => {
-    const cache = new ResponseCache(config, () => 0);
-    cache.set("a", reply("a"));
-    cache.set("b", reply("b"));
-    cache.get("a"); // a is now most recent
-    cache.set("c", reply("c"));
-    expect(cache.get("b")).toBeUndefined();
-    expect(cache.get("a")).toBeDefined();
-    expect(cache.size).toBe(2);
+  it("evicts the least recently used entry when full", async () => {
+    const cache = new MemoryCacheStore(config, () => 0);
+    await cache.set("a", reply("a"));
+    await cache.set("b", reply("b"));
+    await cache.get("a"); // a is now most recent
+    await cache.set("c", reply("c"));
+    expect(await cache.get("b")).toBeUndefined();
+    expect(await cache.get("a")).toBeDefined();
+  });
+});
+
+/** Every cache store must behave the same way. */
+function cacheStoreContract(name: string, available: boolean, makeStore: (ttlMs: number) => CacheStore) {
+  describe.skipIf(!available)(`${name} cache store contract`, () => {
+    const unique = () => `test-${name}-${Math.random()}`;
+
+    it("returns what was stored, and nothing for unknown keys", async () => {
+      const store = makeStore(1000);
+      const key = unique();
+      expect(await store.get(key)).toBeUndefined();
+      await store.set(key, reply("stored"));
+      expect(await store.get(key)).toEqual(reply("stored"));
+      await store.close();
+    });
+
+    it("expires entries after the TTL", async () => {
+      const store = makeStore(50);
+      const key = unique();
+      await store.set(key, reply("short-lived"));
+      await sleep(120);
+      expect(await store.get(key)).toBeUndefined();
+      await store.close();
+    });
+  });
+}
+
+cacheStoreContract("memory", true, (ttlMs) => new MemoryCacheStore({ ttlMs, maxEntries: 100 }));
+// Runs when REDIS_URL is set (CI provides a Redis service); skipped otherwise.
+cacheStoreContract("redis", !!process.env.REDIS_URL, (ttlMs) => new RedisCacheStore(process.env.REDIS_URL!, ttlMs));
+
+describe("cache store failures", () => {
+  it("are treated as a miss, so a cache outage never fails a request", async () => {
+    const broken: CacheStore = {
+      get: () => Promise.reject(new Error("ECONNREFUSED")),
+      set: () => Promise.reject(new Error("ECONNREFUSED")),
+      close: async () => {},
+    };
+    const app = makeApp({ cacheStore: broken });
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { "x-api-key": KEY },
+      payload: messageBody({ temperature: 0 }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["x-gateway-cache"]).toBe("MISS");
   });
 });
 

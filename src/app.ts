@@ -5,6 +5,7 @@ import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
 import { KeyStore, readApiKey } from "./auth.js";
+import { MemoryCacheStore, type CacheStore } from "./cache.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { ClientAbortedError, GatewayError, ProviderError } from "./errors.js";
 import { Gateway, type StreamResult } from "./gateway.js";
@@ -22,8 +23,9 @@ import { createTracing } from "./telemetry/tracing.js";
 export interface AppOptions {
   config: GatewayConfig;
   providers: Map<string, Provider>;
-  /** Defaults to an in-memory store; server.ts passes a Redis store when REDIS_URL is set. */
+  /** Default to in-memory stores; server.ts passes Redis stores when REDIS_URL is set. */
   rateLimitStore?: RateLimitStore;
+  cacheStore?: CacheStore;
   /** true for JSON logs on stdout; tests pass a stream to capture them. */
   logger?: boolean | { stream: Writable; level?: string };
   /** Tests pass an in-memory exporter; otherwise exporters come from OTEL_* env vars. */
@@ -68,6 +70,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
 
   const tracing = createTracing(process.env, options.spanExporter);
   const rateLimitStore = options.rateLimitStore ?? new MemoryRateLimitStore();
+  const cacheStore = options.cacheStore ?? new MemoryCacheStore(config.cache);
   // The router needs the metrics and the metrics need the router (breaker gauge),
   // so the gauge reads the router lazily through this arrow function.
   const metrics = new Metrics(() => router.breakerStates());
@@ -88,8 +91,10 @@ export function buildApp(options: AppOptions): FastifyInstance {
     limiter: new RateLimiter(rateLimitStore, (err) => app.log.warn({ err }, "rate limit store failed; allowing request")),
     meter,
     guardrails,
+    cache: cacheStore,
     metrics,
     tracer: tracing.tracer,
+    onDegraded: (what, err) => app.log.warn({ err }, `${what} failed; continuing without it`),
   });
   const keyStore = new KeyStore(config.keys);
 
@@ -98,6 +103,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   });
   app.addHook("onClose", async () => {
     await rateLimitStore.close();
+    await cacheStore.close();
     await tracing.shutdown();
   });
 

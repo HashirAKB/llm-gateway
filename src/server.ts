@@ -2,12 +2,15 @@ import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createProviders } from "./providers/index.js";
 import { RedisRateLimitStore } from "./rate-limit/redis-store.js";
+import { RedisCacheStore } from "./redis-cache.js";
 
 const config = loadConfig(process.env.GATEWAY_CONFIG ?? "config/gateway.json");
 const providers = createProviders(config, process.env);
-// Share rate limits across gateway instances when Redis is available.
-const rateLimitStore = process.env.REDIS_URL ? new RedisRateLimitStore(process.env.REDIS_URL) : undefined;
-const app = buildApp({ config, providers, rateLimitStore, logger: true });
+// With Redis, rate limits and the response cache are shared across gateway instances.
+const redisUrl = process.env.REDIS_URL;
+const rateLimitStore = redisUrl ? new RedisRateLimitStore(redisUrl) : undefined;
+const cacheStore = redisUrl ? new RedisCacheStore(redisUrl, config.cache.ttlMs) : undefined;
+const app = buildApp({ config, providers, rateLimitStore, cacheStore, logger: true });
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {

@@ -16,8 +16,9 @@ Each milestone: tests first, simplest implementation, all checks green, commit, 
 - [x] N2 Time-to-first-token histogram and stream idle timeout
 - [x] N3 Budget reservation for concurrent requests
 - [x] N4 Output guardrails on streams
-- [ ] N5 Redis-backed response cache and usage ledger
-- [ ] N6 Latency-aware routing
+- [x] N5 Redis-backed response cache (shared across instances, fails open)
+- [ ] N6 Budget spend and reservations in Redis (atomic reserve, durable across restarts)
+- [ ] N7 Latency-aware routing
 
 ## Blockers
 

@@ -1,6 +1,6 @@
 import { trace, type Span, type Tracer } from "@opentelemetry/api";
 import type { MessagesRequest, MessagesResponse } from "./api.js";
-import { ResponseCache, cacheKey, isCacheable } from "./cache.js";
+import { cacheKey, isCacheable, type CacheStore } from "./cache.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { GatewayError } from "./errors.js";
 import { runGuardrails, type Guardrail } from "./guardrails/guardrail.js";
@@ -40,7 +40,10 @@ export interface GatewayDeps {
   limiter: RateLimiter;
   meter: UsageMeter;
   guardrails: Guardrail[];
+  cache: CacheStore;
   metrics: Metrics;
+  /** Called when a dependency that may fail open (the cache) fails. */
+  onDegraded?: (what: string, err: unknown) => void;
   tracer?: Tracer;
   now?: () => number;
 }
@@ -60,13 +63,11 @@ export interface GatewayDeps {
  * HTTP concerns (auth, parsing, SSE rendering) stay in app.ts.
  */
 export class Gateway {
-  private readonly cache: ResponseCache;
   private readonly now: () => number;
   private readonly tracer: Tracer;
 
   constructor(private readonly deps: GatewayDeps) {
     this.now = deps.now ?? Date.now;
-    this.cache = new ResponseCache(deps.config.cache, this.now);
     this.tracer = deps.tracer ?? trace.getTracer("llm-gateway");
   }
 
@@ -130,7 +131,7 @@ export class Gateway {
 
     // Step 4. The key is computed on the guarded request, so redacted prompts share entries.
     const storeKey = isCacheable(request, this.deps.config.cache) ? cacheKey(key.name, request) : undefined;
-    const cached = storeKey ? this.cache.get(storeKey) : undefined;
+    const cached = storeKey ? await this.cacheGet(storeKey) : undefined;
     if (storeKey) this.deps.metrics.cacheLookups.inc({ result: cached ? "hit" : "miss" });
     if (cached) {
       await this.deps.limiter.reconcile(key, admission.estimate, 0); // no upstream tokens were used
@@ -155,7 +156,7 @@ export class Gateway {
     this.deps.metrics.guardrailFindings.inc(output.findings);
     const response = toMessagesResponse({ ...value, text: output.value });
 
-    if (storeKey) this.cache.set(storeKey, response); // step 7
+    if (storeKey) await this.cacheSet(storeKey, response); // step 7
     // Price by the configured target model: config validation guarantees it has a price.
     await this.settle(key, admission, target.model, value.inputTokens, value.outputTokens, startedAt); // step 8
 
@@ -232,6 +233,27 @@ export class Gateway {
     }
     span.setAttributes({ "gateway.cache": "SKIP", "gateway.attempts": attempts });
     return { target, attempts, start, chunks: chunks(), guardrailFindings };
+  }
+
+  /**
+   * The cache is an optimisation, so it fails open: if the store errors
+   * (for example Redis is down), the request carries on as a cache miss.
+   */
+  private async cacheGet(key: string): Promise<MessagesResponse | undefined> {
+    try {
+      return await this.deps.cache.get(key);
+    } catch (err) {
+      this.deps.onDegraded?.("cache read", err);
+      return undefined;
+    }
+  }
+
+  private async cacheSet(key: string, value: MessagesResponse): Promise<void> {
+    try {
+      await this.deps.cache.set(key, value);
+    } catch (err) {
+      this.deps.onDegraded?.("cache write", err);
+    }
   }
 
   /** Step 3. */

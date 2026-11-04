@@ -24,6 +24,7 @@ flowchart LR
     res --> mock[(MockProvider)]
     res --> anthropic[(AnthropicProvider)]
     rl <-.-> redis[(Redis<br/>optional)]
+    cache <-.-> redis
     meter -.-> obs[/logs, /metrics,<br/>traces, /v1/usage/]
 ```
 
@@ -33,7 +34,7 @@ Request flow, in order (see `src/gateway.ts`):
 2. **Budget**: the request's worst-case cost is reserved against the key's `budgetUsd`; if spend plus in-flight reservations plus this request could exceed it, the answer is `429 budget_exceeded`.
 3. **Rate limit**: requests/min and tokens/min token buckets per key, in memory or in Redis.
 4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`. Optionally the same is applied to replies, including streams.
-5. **Cache**: identical deterministic requests are answered from memory.
+5. **Cache**: identical deterministic requests are answered from the cache (in memory, or in Redis to share it across instances). A cache outage is treated as a miss.
 6. **Route**: the alias (`fast`, `smart`) maps to an ordered list of provider models. Each target is wrapped in timeout, circuit breaker and retry with backoff and jitter; on failure the next target is tried.
 7. **Settle**: real token usage reconciles the rate limit and is priced from the price table.
 
@@ -60,7 +61,7 @@ curl -s localhost:8080/v1/messages -H 'x-api-key: gw-demo-key-app1' -H 'content-
 
 Open `http://localhost:8080/dashboard` and enter the admin key `gw-demo-key-admin`. The demo keys are `gw-demo-key-app1`, `gw-demo-key-app2` and `gw-demo-key-admin`; the config only holds their hashes.
 
-For the full stack (gateway, Redis for shared rate limits, Jaeger for traces, Prometheus for metrics):
+For the full stack (gateway, Redis for shared rate limits and cache, Jaeger for traces, Prometheus for metrics):
 
 ```bash
 docker compose up --build
@@ -153,7 +154,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 - Text-only messages. No tool use, images or documents; the stream chunk model carries text only.
 - Virtual keys live in the config file (as SHA-256 hashes in the default config). There is no key management API; adding or revoking a key means editing config and restarting.
-- Usage, budgets, cache and circuit breakers are in memory and per process. Only rate limits can be shared, via Redis. A restart resets spend, so budgets are not durable.
+- Usage, budgets and circuit breakers are in memory and per process. Rate limits and the response cache are shared through Redis when `REDIS_URL` is set. A restart resets spend, so budgets are not durable.
 - If Redis is unreachable, rate limits fail open (requests are allowed and a warning is logged).
 - Streams cut off midway are metered from an estimate of the text already sent, not from provider-reported usage.
 - PII redaction is regex-based: emails and 10 to 15 digit phone numbers only. It misses names, addresses and unusual formats. Redacting replies (`piiRedactionOutput`) is opt-in; on streams it releases text a word at a time.
@@ -164,7 +165,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
+1. Keep budget spend and reservations in Redis (with an atomic Lua reserve), so budgets hold across instances and survive restarts.
 2. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
 
 ## Project layout
@@ -177,7 +178,8 @@ src/
   router.ts            alias to targets, fallback, retry, breaker, timeout
   resilience/          retry.ts, circuit-breaker.ts, timeout.ts
   rate-limit/          token-bucket.ts (pure math), store.ts, redis-store.ts, limiter.ts
-  cache.ts             cache policy, normalised key, TTL + LRU store
+  cache.ts             cache policy, normalised key, in-memory TTL + LRU store
+  redis-cache.ts       shared cache store in Redis
   metering.ts          prices, usage ledger, percentiles
   guardrails/          guardrail.ts (interface), pii.ts, stream.ts (chunk-safe output guard)
   providers/           provider.ts (interface), mock.ts, anthropic.ts
