@@ -1,18 +1,69 @@
 {
   "keys": [
-    { "key": "gw-demo-key-app1", "name": "app1" },
-    { "key": "gw-demo-key-app2", "name": "app2" }
+    {
+      "key": "gw-demo-key-app1",
+      "name": "app1",
+      "rateLimit": {
+        "requestsPerMinute": 600,
+        "tokensPerMinute": 200000
+      }
+    },
+    {
+      "key": "gw-demo-key-app2",
+      "name": "app2",
+      "rateLimit": {
+        "requestsPerMinute": 30,
+        "tokensPerMinute": 20000
+      }
+    }
   ],
   "routes": {
     "fast": [
-      { "provider": "anthropic", "model": "claude-haiku-5-5" },
-      { "provider": "mock", "model": "mock-fast" }
+      {
+        "provider": "anthropic",
+        "model": "claude-haiku-5-5"
+      },
+      {
+        "provider": "mock",
+        "model": "mock-fast"
+      }
     ],
     "smart": [
-      { "provider": "anthropic", "model": "claude-opus-5-5" },
-      { "provider": "anthropic", "model": "claude-sonnet-5-5" },
-      { "provider": "mock", "model": "mock-smart" }
+      {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5"
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      {
+        "provider": "mock",
+        "model": "mock-smart"
+      }
     ]
   },
-  "mock": { "latencyMs": 50, "chunkDelayMs": 5, "errorRate": 0 }
+  "mock": {
+    "latencyMs": 50,
+    "chunkDelayMs": 5,
+    "errorRate": 0
+  },
+  "resilience": {
+    "timeoutMs": 30000,
+    "retry": {
+      "maxAttempts": 3,
+      "baseDelayMs": 100,
+      "maxDelayMs": 2000
+    },
+    "circuitBreaker": {
+      "failureThreshold": 5,
+      "cooldownMs": 30000
+    }
+  },
+  "cache": {
+    "enabled": true,
+    "ttlMs": 300000,
+    "maxEntries": 10000,
+    "cacheNonZeroTemperature": false
+  }
 }

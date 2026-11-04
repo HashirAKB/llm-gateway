@@ -1,21 +1,54 @@
-import type { Target } from "./config.js";
-import { GatewayError } from "./errors.js";
+import type { ResilienceConfig, Target } from "./config.js";
+import { GatewayError, ProviderError } from "./errors.js";
 import type { Provider, ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
+import { CircuitBreaker, type BreakerState } from "./resilience/circuit-breaker.js";
+import { retry } from "./resilience/retry.js";
+import { withTimeout } from "./resilience/timeout.js";
 
 /** An open upstream stream whose first chunk (`start`) has already arrived. */
 export interface OpenStream {
-  target: Target;
   start: Extract<StreamChunk, { type: "start" }>;
   rest: AsyncIterator<StreamChunk>;
 }
 
+export interface Routed<T> {
+  target: Target;
+  value: T;
+  /** Upstream calls made, across retries and fallbacks. 1 means first try succeeded. */
+  attempts: number;
+}
+
+export interface RouterHooks {
+  /** Injectable for deterministic tests. */
+  now?: () => number;
+  random?: () => number;
+  sleep?: (ms: number) => Promise<unknown>;
+  /** Observability callbacks (wired to metrics in app.ts). */
+  onRetry?: (target: Target) => void;
+  onFallback?: (failed: Target, err: ProviderError) => void;
+}
+
 /**
- * Turns an alias like "fast" into a concrete provider + model and makes the call.
+ * Turns an alias like "smart" into a reply, layering resilience around each target:
+ *
+ *   for each target in order (fallback):
+ *     retry with backoff + jitter (retryable errors only):
+ *       circuit breaker for the target's provider:
+ *         timeout:
+ *           provider call
+ *
+ * Retry handles transient errors on the same target. Fallback handles a target
+ * that is unavailable for any reason. The breaker sits inside retry so that, once
+ * it opens, the remaining retries stop at once and we move to the next target.
  */
 export class Router {
+  private readonly breakers = new Map<string, CircuitBreaker>();
+
   constructor(
     private readonly routes: Record<string, Target[]>,
     private readonly providers: Map<string, Provider>,
+    private readonly resilience: ResilienceConfig,
+    private readonly hooks: RouterHooks = {},
   ) {}
 
   /** Targets for an alias, skipping providers that are not configured (e.g. no API key). */
@@ -32,23 +65,74 @@ export class Router {
     return available;
   }
 
-  async complete(alias: string, req: UpstreamRequest, signal: AbortSignal) {
-    const target = this.targetsFor(alias)[0]!;
-    const response: ProviderResponse = await this.provider(target).complete({ ...req, model: target.model }, signal);
-    return { target, response };
+  breakerState(provider: string): BreakerState {
+    return this.breaker(provider).state;
   }
 
-  async openStream(alias: string, req: UpstreamRequest, signal: AbortSignal): Promise<OpenStream> {
-    const target = this.targetsFor(alias)[0]!;
-    const iterator = this.provider(target).stream({ ...req, model: target.model }, signal)[Symbol.asyncIterator]();
-    const first = await iterator.next();
-    if (first.done || first.value.type !== "start") {
-      throw new GatewayError(502, "api_error", "Upstream stream did not start correctly");
+  complete(alias: string, req: UpstreamRequest, signal: AbortSignal): Promise<Routed<ProviderResponse>> {
+    return this.withFallback(alias, signal, (provider, model, attemptSignal) =>
+      provider.complete({ ...req, model }, attemptSignal),
+    );
+  }
+
+  /**
+   * Opens a stream and waits for its first chunk. Retries and fallback apply
+   * only up to that point: once the caller starts forwarding bytes to the
+   * client, a failure can no longer be hidden by switching providers.
+   */
+  openStream(alias: string, req: UpstreamRequest, signal: AbortSignal): Promise<Routed<OpenStream>> {
+    return this.withFallback(alias, signal, async (provider, model, attemptSignal) => {
+      const iterator = provider.stream({ ...req, model }, attemptSignal)[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      if (first.done || first.value.type !== "start") {
+        throw new ProviderError(`${provider.name}: stream did not start correctly`, undefined, true);
+      }
+      return { start: first.value, rest: iterator };
+    });
+  }
+
+  private async withFallback<T>(
+    alias: string,
+    signal: AbortSignal,
+    call: (provider: Provider, model: string, signal: AbortSignal) => Promise<T>,
+  ): Promise<Routed<T>> {
+    const failures: string[] = [];
+    let attempts = 0;
+
+    for (const target of this.targetsFor(alias)) {
+      const provider = this.providers.get(target.provider)!;
+      const breaker = this.breaker(target.provider);
+      try {
+        const value = await retry(
+          () =>
+            breaker.execute(() => {
+              attempts += 1;
+              return withTimeout((s) => call(provider, target.model, s), this.resilience.timeoutMs, signal);
+            }),
+          {
+            ...this.resilience.retry,
+            random: this.hooks.random,
+            sleep: this.hooks.sleep,
+            onRetry: () => this.hooks.onRetry?.(target),
+          },
+        );
+        return { target, value, attempts };
+      } catch (err) {
+        if (!(err instanceof ProviderError)) throw err; // a bug, not an upstream failure
+        if (signal.aborted) throw err; // the client is gone; stop trying
+        failures.push(`${target.provider}/${target.model}: ${err.message}`);
+        this.hooks.onFallback?.(target, err);
+      }
     }
-    return { target, start: first.value, rest: iterator };
+    throw new GatewayError(502, "api_error", `All upstream targets failed. ${failures.join("; ")}`);
   }
 
-  private provider(target: Target): Provider {
-    return this.providers.get(target.provider)!;
+  private breaker(provider: string): CircuitBreaker {
+    let breaker = this.breakers.get(provider);
+    if (!breaker) {
+      breaker = new CircuitBreaker(provider, this.resilience.circuitBreaker, this.hooks.now);
+      this.breakers.set(provider, breaker);
+    }
+    return breaker;
   }
 }

@@ -36,3 +36,32 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** virtual keys are stored as plaintext in `config/gateway.json`.
 - **Alternatives:** store SHA-256 hashes; a key management API.
 - **Why:** keeps the quickstart copy-pasteable. Listed as a limitation; hashing is on the "next" list.
+
+## D8. Fallback on any target failure; retry only on retryable errors
+- **Decision:** retries (same target) happen only for retryable errors (408/409/429/5xx, timeouts, network). Fallback to the next target happens for any `ProviderError`, including non-retryable ones and an open circuit.
+- **Alternatives:** fall back only on retryable errors, returning 4xx immediately.
+- **Why:** the next target is a different provider or model, so a provider-specific 4xx (unknown model, bad upstream credentials) may well succeed there. The cost is one extra call for requests that are bad everywhere. One rule each is easier to reason about.
+
+## D9. Circuit breaker wraps each attempt (inside retry)
+- **Decision:** order is fallback > retry > breaker > timeout > call.
+- **Alternatives:** breaker around the whole retry loop.
+- **Why:** each real upstream call updates provider health, and when the breaker opens mid-retry the remaining retries stop immediately (CircuitOpenError is not retryable), moving straight to the next target. Only retryable errors count as breaker failures.
+
+## D10. Streams: timeout bounds time to first byte; no retry after it
+- **Decision:** for streams, the per-attempt timeout covers the wait for the `start` chunk. After that the stream runs until done or the client disconnects. A mid-stream failure becomes an SSE `error` event and is not counted against the breaker.
+- **Alternatives:** an idle timeout between chunks; replaying the request on another provider mid-stream.
+- **Why:** bytes already sent cannot be taken back, so mid-stream replay would duplicate text. An inter-chunk idle timeout is on the "next" list.
+
+## D11. Token rate limit: check an estimate, reconcile with real usage
+- **Decision:** before the call, take `estimate = ceil(input chars / 4) + max_tokens` from the tokens bucket. After the call, charge (or refund) the difference to the real total. The bucket may go negative.
+- **Alternatives:** count only after the call (lets one key burst far over the limit); call a token-counting endpoint first (extra latency, not available offline).
+- **Why:** the estimate is an upper bound for output, so admission is conservative, and reconciliation keeps the long-run rate exact.
+
+## D12. Cache is scoped per virtual key, and an omitted temperature counts as 1
+- **Decision:** the cache key includes the key name. A request without `temperature` is treated as temperature 1 (the Anthropic default) and so is not cached unless `cacheNonZeroTemperature` is on.
+- **Alternatives:** a global cache shared by tenants (higher hit rate); treating a missing temperature as cacheable.
+- **Why:** tenant isolation is the safe default for a shared gateway. Treating "unspecified" as deterministic would replay one sample to clients that expect variety.
+
+## D13. Cache hits refund the token estimate and record zero cost
+- **Decision:** a cache hit still costs one request in the requests bucket but no LLM tokens.
+- **Why:** the token limit exists to protect upstream spend and capacity; a hit uses neither.

@@ -11,6 +11,13 @@ const VirtualKeySchema = z.object({
   key: z.string().min(8),
   /** Human-readable name used in logs, metrics and the usage report. */
   name: z.string().min(1),
+  /** Optional per-key limits; a missing field means "no limit". */
+  rateLimit: z
+    .object({
+      requestsPerMinute: z.number().int().positive().optional(),
+      tokensPerMinute: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 
 export const ConfigSchema = z.object({
@@ -24,11 +31,39 @@ export const ConfigSchema = z.object({
       errorRate: z.number().min(0).max(1).default(0),
     })
     .prefault({}),
+  resilience: z
+    .object({
+      /** Per-attempt deadline. For streams it bounds the time to the first byte. */
+      timeoutMs: z.number().positive().default(30_000),
+      retry: z
+        .object({
+          maxAttempts: z.number().int().min(1).default(3),
+          baseDelayMs: z.number().nonnegative().default(100),
+          maxDelayMs: z.number().nonnegative().default(2_000),
+        })
+        .prefault({}),
+      circuitBreaker: z
+        .object({
+          failureThreshold: z.number().int().min(1).default(5),
+          cooldownMs: z.number().positive().default(30_000),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
+  cache: z
+    .object({
+      enabled: z.boolean().default(true),
+      ttlMs: z.number().positive().default(5 * 60_000),
+      maxEntries: z.number().int().positive().default(10_000),
+      cacheNonZeroTemperature: z.boolean().default(false),
+    })
+    .prefault({}),
 });
 
 export type GatewayConfig = z.infer<typeof ConfigSchema>;
 export type Target = z.infer<typeof TargetSchema>;
 export type VirtualKey = z.infer<typeof VirtualKeySchema>;
+export type ResilienceConfig = GatewayConfig["resilience"];
 
 /** Parses and validates a config object; throws a readable error if it is invalid. */
 export function parseConfig(raw: unknown): GatewayConfig {

@@ -1,14 +1,19 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { MessagesRequestSchema, type MessagesRequest, type MessagesResponse } from "./api.js";
-import type { GatewayConfig, VirtualKey } from "./config.js";
+import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
+import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { GatewayError, ProviderError } from "./errors.js";
-import type { Provider, UpstreamRequest } from "./providers/provider.js";
+import { Gateway, type StreamResult } from "./gateway.js";
+import type { Provider } from "./providers/provider.js";
+import { RateLimiter } from "./rate-limit/limiter.js";
+import { MemoryRateLimitStore, type RateLimitStore } from "./rate-limit/store.js";
 import { Router } from "./router.js";
 import { writeSse } from "./sse.js";
 
 export interface AppOptions {
   config: GatewayConfig;
   providers: Map<string, Provider>;
+  /** Defaults to an in-memory store; server.ts passes a Redis store when REDIS_URL is set. */
+  rateLimitStore?: RateLimitStore;
   logger?: boolean;
 }
 
@@ -26,8 +31,12 @@ declare module "fastify" {
 export function buildApp(options: AppOptions): FastifyInstance {
   const { config, providers } = options;
   const app = Fastify({ logger: options.logger ?? false });
-  const router = new Router(config.routes, providers);
+  const rateLimitStore = options.rateLimitStore ?? new MemoryRateLimitStore();
+  const router = new Router(config.routes, providers, config.resilience);
+  const gateway = new Gateway(config, router, new RateLimiter(rateLimitStore));
   const keysBySecret = new Map(config.keys.map((k) => [k.key, k]));
+
+  app.addHook("onClose", () => rateLimitStore.close());
 
   app.setErrorHandler((err, request, reply) => {
     if (err instanceof GatewayError) {
@@ -44,6 +53,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   app.get("/health", async () => ({ status: "ok" }));
 
   app.register(async (v1) => {
+    // Every /v1 route requires a valid virtual key.
     v1.addHook("onRequest", async (request) => {
       const secret = readApiKey(request);
       const key = secret ? keysBySecret.get(secret) : undefined;
@@ -52,29 +62,22 @@ export function buildApp(options: AppOptions): FastifyInstance {
     });
 
     v1.post("/v1/messages", async (request, reply) => {
+      const key = request.virtualKey!;
       const body = parseBody(request.body);
-      const upstreamRequest: UpstreamRequest = {
-        system: body.system,
-        messages: body.messages,
-        max_tokens: body.max_tokens,
-        temperature: body.temperature,
-      };
+      const abort = abortOnClientClose(reply);
 
       if (body.stream) {
-        return streamResponse(request, reply, router, body.model, upstreamRequest);
+        const result = await gateway.stream(key, body, abort.signal);
+        return sendStream(request, reply, result);
       }
 
-      const { target, response } = await router.complete(body.model, upstreamRequest, AbortSignal.timeout(60_000));
-      const result: MessagesResponse = {
-        id: response.id,
-        type: "message",
-        role: "assistant",
-        model: response.model,
-        content: [{ type: "text", text: response.text }],
-        stop_reason: response.stopReason,
-        usage: { input_tokens: response.inputTokens, output_tokens: response.outputTokens },
-      };
-      return reply.headers({ "x-gateway-provider": target.provider }).send(result);
+      const result = await gateway.complete(key, body, abort.signal);
+      return reply
+        .headers({
+          "x-gateway-cache": result.cache,
+          ...(result.target ? routingHeaders(result.target, result.attempts) : {}),
+        })
+        .send(result.response);
     });
   });
 
@@ -82,30 +85,20 @@ export function buildApp(options: AppOptions): FastifyInstance {
 }
 
 /**
- * Streams the reply as SSE. Everything before `router.openStream` returns can
- * still fail with a normal JSON error; once headers are written we are committed,
- * and later failures can only be reported as an SSE `error` event.
+ * Renders a stream as Messages-style SSE. By the time we get here the upstream
+ * has already sent its first chunk, so we commit to a 200 and write headers.
+ * From now on a failure can only be reported as an SSE `error` event.
  */
-async function streamResponse(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  router: Router,
-  alias: string,
-  upstreamRequest: UpstreamRequest,
-) {
-  // Abort the upstream call if the client goes away mid-stream.
-  const abort = new AbortController();
-  reply.raw.on("close", () => abort.abort());
-
-  const { target, start, rest } = await router.openStream(alias, upstreamRequest, abort.signal);
-
+async function sendStream(request: FastifyRequest, reply: FastifyReply, result: StreamResult) {
+  const { target, attempts, start, chunks } = result;
   reply.hijack();
   const res = reply.raw;
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     connection: "keep-alive",
-    "x-gateway-provider": target.provider,
+    "x-gateway-cache": "SKIP",
+    ...routingHeaders(target, attempts),
   });
 
   writeSse(res, "message_start", {
@@ -123,8 +116,7 @@ async function streamResponse(
   writeSse(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
 
   try {
-    for (let next = await rest.next(); !next.done; next = await rest.next()) {
-      const chunk = next.value;
+    for await (const chunk of chunks) {
       if (chunk.type === "text") {
         writeSse(res, "content_block_delta", {
           type: "content_block_delta",
@@ -146,6 +138,23 @@ async function streamResponse(
     writeSse(res, "error", errorBody("api_error", "Upstream failed mid-stream"));
   }
   res.end();
+}
+
+/** Aborts upstream work if the client disconnects before we finish responding. */
+function abortOnClientClose(reply: FastifyReply): AbortController {
+  const abort = new AbortController();
+  reply.raw.on("close", () => {
+    if (!reply.raw.writableFinished) abort.abort();
+  });
+  return abort;
+}
+
+function routingHeaders(target: Target, attempts: number): Record<string, string> {
+  return {
+    "x-gateway-provider": target.provider,
+    "x-gateway-model": target.model,
+    "x-gateway-attempts": String(attempts),
+  };
 }
 
 function readApiKey(request: FastifyRequest): string | undefined {
