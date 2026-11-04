@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "loadtest": "tsx scripts/loadtest.ts"
+    "loadtest": "tsx scripts/loadtest.ts",
+    "demo": "tsx scripts/demo.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.4.0",
@@ -39,5 +40,6 @@
     "typescript": "~6.0",
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.1.0"
-  }
+  },
+  "author": "Hashir Ahmed K B"
 }
