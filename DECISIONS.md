@@ -162,3 +162,12 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D34. Splitting the "move cache and usage to Redis" item
 - **Decision:** shipped the shared cache first; durable budgets in Redis is the next item.
 - **Why:** the cache is a simple key-value move. Budgets need an atomic check-and-reserve across instances (a Lua script) and a decision about what the usage report shows when spend is global but latency data is per instance. Separate commits keep each change reviewable.
+
+## D35. Budget spend and reservations live in a BudgetStore; Redis makes them global
+- **Decision:** `BudgetStore { reserve, settle, spentUsd }` with a memory store and a Redis store. Redis keeps spend, a hash of reservations and a sorted set of their expiry times per key, under a cluster hash tag; `reserve` and `settle` are Lua scripts. Reservations expire after 15 minutes. `UsageMeter` keeps only per-instance statistics; `/v1/usage` adds `budgetSpentUsd` from the store.
+- **Alternatives:** `INCRBYFLOAT` on spend only (not atomic with the check); a distributed lock (slower, more failure modes).
+- **Why:** one round trip per admission and per settlement, atomic across instances, and crash-safe through expiry.
+
+## D36. Budget store outage fails closed; rate limits and cache fail open
+- **Decision:** if the budget store cannot be reached, requests from keys that have a budget get 503; keys without a budget carry on. A failed settlement is logged (the Redis reservation then expires by itself).
+- **Why:** budgets are a financial control, so overspending is worse than refusing. Rate limits and the cache protect capacity and latency, where availability matters more.

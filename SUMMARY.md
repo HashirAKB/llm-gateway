@@ -9,7 +9,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 - Resilience per target: retries with exponential backoff and full jitter (retryable errors only), per-attempt timeouts via `AbortSignal`, and a per-provider circuit breaker (closed, open, half-open). Streams are retried only before the first byte, then guarded by an idle timeout between chunks.
 - Per-key token-bucket rate limits for requests/min and tokens/min, with an in-memory store and an atomic Redis (Lua) store that pass the same contract tests.
 - An exact-match response cache keyed on a normalised request hash, scoped per tenant, limited to deterministic non-streaming requests; in memory (TTL + LRU) or shared through Redis, failing open as a miss.
-- Cost metering from a price table, `GET /v1/usage`, and hard per-key budgets returning `429 budget_exceeded`, enforced under concurrency by reserving each request's worst-case cost.
+- Cost metering from a price table, `GET /v1/usage`, and hard per-key budgets returning `429 budget_exceeded`, enforced under concurrency by reserving each request's worst-case cost (atomically across instances via a Redis Lua script).
 - A pluggable guardrail interface with a regex PII redactor for emails and phone numbers, on prompts and optionally on replies, including streams (redaction stays correct when a match is split across chunks).
 - Observability: one structured JSON log line per request with request ids, Prometheus `/metrics` (latency and time-to-first-token histograms, upstream failures, retries, fallbacks, cache lookups, tokens, cost, breaker state), and OpenTelemetry spans for each request and each upstream attempt.
 - A static dashboard showing usage, p50/p95 latency, cache hit rate, cost and budget use per key.
@@ -21,7 +21,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 |---|---|
 | Upstream LLM in tests, demo and load test | Mocked: `MockProvider`, deterministic, with configurable latency, chunk delay and error rate |
 | Anthropic upstream | Real code using the official SDK, active only with `ANTHROPIC_API_KEY`. Tested offline with a fake `fetch`; not exercised against the live API in this environment |
-| Rate limiting and response cache in Redis | Real: tested against a local Redis and a Redis service in CI |
+| Rate limiting, response cache and budgets in Redis | Real: tested against a local Redis and a Redis service in CI |
 | Metrics, traces, logs | Real libraries (prom-client, OpenTelemetry SDK, pino). Traces export to Jaeger via OTLP in docker-compose |
 | Prices | Real per-token list prices for the configured Claude models at the time of writing; mock models reuse them so cost numbers are realistic |
 | Docker image | Built and smoke-tested in CI. The development sandbox could not pull base images, so the runtime stage was verified by running the production install locally |
@@ -30,7 +30,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 
 - Text-only messages: no tool use, images or documents.
 - Keys live in the config file (hashed); there is no key management API.
-- Usage, budgets and breakers are per process and in memory; a restart resets spend. (Rate limits and the cache can be shared through Redis.)
+- Usage statistics and circuit breakers are per process. Without Redis, a restart resets budget spend.
 - PII redaction is regex-based (emails and phone numbers only).
 - Token estimates before a call use a 4 characters per token heuristic.
 

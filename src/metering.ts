@@ -51,27 +51,13 @@ const LATENCY_WINDOW = 1000;
 const zeroTotals = (): Totals => ({ requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
 
 /**
- * In-memory usage ledger per virtual key. It answers two questions:
- * "how much has this key spent?" (for budgets) and "what does usage look like?"
- * (for GET /v1/usage and the dashboard). It resets when the process restarts.
+ * In-memory usage statistics per virtual key, for GET /v1/usage and the
+ * dashboard: requests, tokens, cost, cache hits, latency percentiles. It covers
+ * this process only and resets on restart. (Budget enforcement uses a
+ * BudgetStore, which can be shared through Redis.)
  */
 export class UsageMeter {
   private readonly usage = new Map<string, KeyUsage>();
-  /** Worst-case cost of requests in flight, per key (see Gateway.admit). */
-  private readonly reserved = new Map<string, number>();
-
-  reserve(keyName: string, usd: number): void {
-    this.reserved.set(keyName, this.reservedUsd(keyName) + usd);
-  }
-
-  release(keyName: string, usd: number): void {
-    // Clamp at 0 so floating point leftovers never turn into negative reservations.
-    this.reserved.set(keyName, Math.max(0, this.reservedUsd(keyName) - usd));
-  }
-
-  reservedUsd(keyName: string): number {
-    return this.reserved.get(keyName) ?? 0;
-  }
 
   record(keyName: string, record: UsageRecord): void {
     const usage = this.forKey(keyName);
@@ -88,10 +74,6 @@ export class UsageMeter {
 
   recordError(keyName: string): void {
     this.forKey(keyName).errors += 1;
-  }
-
-  spentUsd(keyName: string): number {
-    return this.usage.get(keyName)?.costUsd ?? 0;
   }
 
   report(keyName: string): KeyReport {

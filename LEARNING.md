@@ -60,7 +60,7 @@ An *exact-match* cache stores a reply under a hash of the request and returns it
 
 ### 1.14 Cost metering and budgets
 
-Providers price input and output tokens separately, per million tokens. `costUsd` in `src/metering.ts` turns a usage record into dollars from the price table; `UsageMeter` accumulates it per key and per model. A budget is a hard ceiling. The catch is concurrency: ten requests checked at the same moment all see the same "spent so far". So `Gateway.admit` *reserves* each request's worst-case cost (estimated input plus `max_tokens` of output, at the most expensive model the alias may route to) and refuses the request with `429 budget_exceeded` if spend plus existing reservations plus this one would exceed the budget. When the request finishes, `settle` releases the reservation and records the real cost; on failure the reservation is simply released. The check and the reservation run with no `await` between them, so in single-threaded Node no other request can interleave.
+Providers price input and output tokens separately, per million tokens. `costUsd` in `src/metering.ts` turns a usage record into dollars from the price table; `UsageMeter` accumulates it per key and per model. A budget is a hard ceiling. The catch is concurrency: ten requests checked at the same moment all see the same "spent so far". So `Gateway.admit` *reserves* each request's worst-case cost (estimated input plus `max_tokens` of output, at the most expensive model the alias may route to) and refuses the request with `429 budget_exceeded` if spend plus existing reservations plus this one would exceed the budget. When the request finishes, `settle` releases the reservation and records the real cost; on failure the reservation is simply released. The check-and-reserve must be atomic: `MemoryBudgetStore` gets that for free because its method body has no `await`, and single-threaded Node cannot interleave another request. `RedisBudgetStore` does it in one Lua script, so it holds across many gateway instances. Its reservations expire after 15 minutes, so an instance that crashes mid-request cannot block a key forever. If the store is unreachable, budgeted requests are refused (fail closed): a budget is a financial control, unlike a rate limit, which fails open.
 
 ### 1.15 Guardrails
 
@@ -92,14 +92,15 @@ Read in this order. Each file is small; the comment at the top of each says what
 | 10 | `src/rate-limit/token-bucket.ts` | The algorithm as a pure function. |
 | 11 | `src/rate-limit/store.ts` and `redis-store.ts` | One interface, two stores; atomicity with Lua. |
 | 12 | `src/rate-limit/limiter.ts` | Two buckets per key; estimate then reconcile. |
-| 13 | `src/cache.ts` and `src/redis-cache.ts` | Cache policy, normalised keys, TTL, a tiny LRU on top of `Map`, and the same interface over Redis. |
-| 14 | `src/metering.ts` | Prices, the usage ledger, nearest-rank percentiles. |
-| 15 | `src/guardrails/guardrail.ts`, `pii.ts`, `stream.ts` | A plugin interface, a readable regex approach, and how to apply it safely to a stream. |
-| 16 | `src/gateway.ts` | The pipeline: every step above, in order, in one place. |
-| 17 | `src/telemetry/metrics.ts` and `tracing.ts` | Prometheus metric types; OpenTelemetry tracer setup and exporters. |
-| 18 | `src/auth.ts` and `src/app.ts` | The HTTP layer: auth hook, routes, SSE rendering, request ids, logs. |
-| 19 | `src/server.ts` | Wiring for production: config file, env vars, graceful shutdown. |
-| 20 | `test/` | Start with `circuit-breaker.test.ts` and `router.test.ts`: they read like a specification. |
+| 13 | `src/budget/store.ts` and `redis-store.ts` | Reserve-then-settle budgets; atomicity in memory and in Lua; expiring reservations. |
+| 14 | `src/cache.ts` and `src/redis-cache.ts` | Cache policy, normalised keys, TTL, a tiny LRU on top of `Map`, and the same interface over Redis. |
+| 15 | `src/metering.ts` | Prices, the usage ledger, nearest-rank percentiles. |
+| 16 | `src/guardrails/guardrail.ts`, `pii.ts`, `stream.ts` | A plugin interface, a readable regex approach, and how to apply it safely to a stream. |
+| 17 | `src/gateway.ts` | The pipeline: every step above, in order, in one place. |
+| 18 | `src/telemetry/metrics.ts` and `tracing.ts` | Prometheus metric types; OpenTelemetry tracer setup and exporters. |
+| 19 | `src/auth.ts` and `src/app.ts` | The HTTP layer: auth hook, routes, SSE rendering, request ids, logs. |
+| 20 | `src/server.ts` | Wiring for production: config file, env vars, graceful shutdown. |
+| 21 | `test/` | Start with `circuit-breaker.test.ts` and `router.test.ts`: they read like a specification. |
 
 ## Part 3. One request, end to end
 
@@ -116,7 +117,7 @@ Assume no `ANTHROPIC_API_KEY`, so `smart` resolves to its only registered target
 2. **Authentication.** The `/v1` plugin's `onRequest` hook calls `readApiKey`, then `keyStore.find`, which hashes `gw-demo-key-app1` with SHA-256 and finds the matching `keyHash` in config. It sets `request.virtualKey` to the `app1` key config. An unknown key would throw `GatewayError(401)`, which the error handler renders as `{"type":"error","error":{"type":"authentication_error",...}}`.
 3. **Validation.** The route handler calls `parseBody`, which runs `MessagesRequestSchema.safeParse`. A missing `max_tokens` would become a 400 listing the bad fields. It records `{ model: "smart", stream: false }` in `request.summary` for the log line.
 4. **Request span.** `gateway.complete` opens a `gateway.request` span with attributes `gateway.key=app1`, `gateway.model=smart`, and makes it the active span.
-5. **Budget.** `Gateway.admit` computes the worst case: about 7 input tokens plus 100 output tokens at the priciest available `smart` target (`mock-smart`, priced like Claude Opus at $4/$20 per MTok; the Anthropic targets are skipped without a key) is about $0.002. Spend plus reservations plus that is below `budgetUsd` (5), so it reserves $0.002 and continues.
+5. **Budget.** `Gateway.admit` computes the worst case: about 7 input tokens plus 100 output tokens at the priciest available `smart` target (`mock-smart`, priced like Claude Opus at $4/$20 per MTok; the Anthropic targets are skipped without a key) is about $0.002. `MemoryBudgetStore.reserve` (or the Redis Lua script) sees spend plus reservations plus that below `budgetUsd` (5), so it records a $0.002 reservation under a random id and the request continues.
 6. **Rate limit.** `estimateRequestTokens` gives `ceil(28 / 4) + 100 = 107`. `RateLimiter.check` takes 1 from `app1:requests` (600/min) and 107 from `app1:tokens` (200,000/min). Both succeed.
 7. **Guardrails.** `runGuardrails(..., "before", body)` runs `PiiRedactionGuardrail.before`. The message becomes `Email me at [EMAIL]`, with `findings = 1`. The `gateway_guardrail_findings_total` counter goes up by 1.
 8. **Cache lookup.** `isCacheable` is true (not streaming, temperature 0). `cacheKey("app1", redactedRequest)` hashes the normalised request. First time: a miss, `gateway_cache_lookups_total{result="miss"}` goes up.
@@ -124,7 +125,7 @@ Assume no `ANTHROPIC_API_KEY`, so `smart` resolves to its only registered target
 10. **Resilience.** For that target: `retry` calls `breaker.execute` (closed, so it runs) which calls `attempt` (opens an `upstream.attempt` child span) which calls `withTimeout` (30s deadline) which calls `MockProvider.complete`. The mock sleeps 50ms on the abortable signal, rolls its seeded random number against `errorRate` 0, and returns the reply with token counts. The breaker records a success, the span ends.
 11. **Response guardrails.** `runGuardrails(..., "afterText", ...)` runs on the reply text. Output redaction is off in the default config (`piiRedactionOutput: false`), so nothing changes.
 12. **Cache store.** The response is stored under the cache key with a 5-minute TTL (in memory here; in Redis when `REDIS_URL` is set).
-13. **Settle.** `Gateway.settle` reconciles the tokens bucket (real total tokens minus the 107 estimate is refunded), releases the $0.002 budget reservation, prices the call with `costUsd(prices, "mock-smart", input, output)`, records it in `UsageMeter`, and increments `gateway_tokens_total` and `gateway_cost_usd_total`.
+13. **Settle.** `Gateway.settle` reconciles the tokens bucket (real total tokens minus the 107 estimate is refunded), prices the call, swaps the $0.002 reservation for the real cost in the budget store (`settle`), with `costUsd(prices, "mock-smart", input, output)`, records it in `UsageMeter`, and increments `gateway_tokens_total` and `gateway_cost_usd_total`.
 14. **Span attributes.** Back in `gateway.complete`, the span gets `gateway.cache=MISS`, `gateway.attempts=1`, the output token count, and ends.
 15. **HTTP response.** The handler sets `x-gateway-cache: MISS`, `x-gateway-redactions: 1`, `x-gateway-provider: mock`, `x-gateway-model: mock-smart`, `x-gateway-attempts: 1`, and sends the Messages-style JSON.
 16. **After the response.** The `/v1` `onResponse` hook observes the duration in `gateway_request_duration_seconds{key="app1",model="smart",status="200",stream="false"}` and writes one log line: `{"requestId":"...","key":"app1","status":200,"durationMs":52,"model":"smart","provider":"mock","upstreamModel":"mock-smart","attempts":1,"cache":"MISS","msg":"gateway request"}`.
@@ -164,7 +165,7 @@ Only non-streaming requests at temperature 0, by default. At higher temperatures
 `(input tokens * input price + output tokens * output price) / 1,000,000` from a per-model price table. Config validation refuses to start if a routable model has no price. It can be wrong if the price table is stale, or if the provider bills features the gateway does not model (prompt caching discounts, thinking tokens counted differently). Real tokens come from the provider's usage field, so token counts themselves are accurate.
 
 **11. Can a key exceed its budget?**
-Not through concurrency. Each request reserves its worst-case cost at admission (estimated input plus `max_tokens`, at the priciest model in the alias's route), and admission fails if spend plus reservations plus this request would exceed the budget. Settlement swaps the reservation for the real cost. The remaining gaps: the input estimate is a heuristic (4 characters per token), and spend is in memory, so a restart resets it. The tradeoff is that a key close to its limit is refused a little early, because the worst case is rarely reached.
+Not through concurrency. Each request reserves its worst-case cost at admission (estimated input plus `max_tokens`, at the priciest model in the alias's route), and admission fails if spend plus reservations plus this request would exceed the budget. Settlement swaps the reservation for the real cost. With Redis the reservation is atomic across instances and spend survives restarts. The remaining gap: the input estimate is a heuristic (4 characters per token). The tradeoff is that a key close to its limit is refused a little early, because the worst case is rarely reached.
 
 **12. What metrics would you alert on?**
 Error ratio from the latency histogram's status label, p95 latency from the histogram buckets, `gateway_circuit_breaker_state == 2` (a provider is open), a rising `gateway_fallbacks_total` rate (degraded primary), and spend rate from `gateway_cost_usd_total` per key against budget. I would not alert on raw retry counts, which are expected noise.
@@ -176,7 +177,7 @@ Every distinct label value creates a new time series. Request ids are unbounded,
 Inject the clock and the randomness. `CircuitBreaker` takes `now`, `retry` takes `sleep` and `random`, `MemoryRateLimitStore` takes `now`, `MockProvider` takes a seeded `random`. Tests advance a fake clock by exact milliseconds. Only a few small integration tests use real short timers, such as the timeout test.
 
 **15. What would change to run this with many instances behind a load balancer?**
-Rate limits already work across instances via Redis. The response cache is shared through Redis too (`RedisCacheStore`). Still per instance: the usage ledger (so budgets) and circuit breakers. I would move spend and reservations to Redis with a Lua script, so the check-and-reserve stays atomic across instances, and accept per-instance breakers since each instance learns about an outage within a few requests anyway. Sticky sessions are not needed because no per-client state remains in the process.
+Rate limits already work across instances via Redis. The response cache is shared through Redis too (`RedisCacheStore`). Budgets too: `RedisBudgetStore` keeps spend and reservations in Redis and does check-and-reserve in one Lua script. Still per instance: usage statistics (latency percentiles) and circuit breakers. I would ship usage statistics to Prometheus only, and accept per-instance breakers since each instance learns about an outage within a few requests anyway. Sticky sessions are not needed because no per-client state remains in the process.
 
 ## Part 5. Hands-on exercises
 

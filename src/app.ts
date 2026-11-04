@@ -5,6 +5,7 @@ import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
 import { KeyStore, readApiKey } from "./auth.js";
+import { MemoryBudgetStore, type BudgetStore } from "./budget/store.js";
 import { MemoryCacheStore, type CacheStore } from "./cache.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { ClientAbortedError, GatewayError, ProviderError } from "./errors.js";
@@ -26,6 +27,7 @@ export interface AppOptions {
   /** Default to in-memory stores; server.ts passes Redis stores when REDIS_URL is set. */
   rateLimitStore?: RateLimitStore;
   cacheStore?: CacheStore;
+  budgetStore?: BudgetStore;
   /** true for JSON logs on stdout; tests pass a stream to capture them. */
   logger?: boolean | { stream: Writable; level?: string };
   /** Tests pass an in-memory exporter; otherwise exporters come from OTEL_* env vars. */
@@ -71,6 +73,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const tracing = createTracing(process.env, options.spanExporter);
   const rateLimitStore = options.rateLimitStore ?? new MemoryRateLimitStore();
   const cacheStore = options.cacheStore ?? new MemoryCacheStore(config.cache);
+  const budgetStore = options.budgetStore ?? new MemoryBudgetStore();
   // The router needs the metrics and the metrics need the router (breaker gauge),
   // so the gauge reads the router lazily through this arrow function.
   const metrics = new Metrics(() => router.breakerStates());
@@ -90,6 +93,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
     router,
     limiter: new RateLimiter(rateLimitStore, (err) => app.log.warn({ err }, "rate limit store failed; allowing request")),
     meter,
+    budgets: budgetStore,
     guardrails,
     cache: cacheStore,
     metrics,
@@ -104,6 +108,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   app.addHook("onClose", async () => {
     await rateLimitStore.close();
     await cacheStore.close();
+    await budgetStore.close();
     await tracing.shutdown();
   });
 
@@ -196,13 +201,22 @@ export function buildApp(options: AppOptions): FastifyInstance {
     });
 
     // Usage per key. A normal key sees only itself; an admin key sees every key.
+    // Usage statistics are this instance's; budget spend comes from the budget
+    // store, so with Redis it is the total across all instances.
     v1.get("/v1/usage", async (request) => {
       const caller = request.virtualKey!;
       const visible = caller.admin ? config.keys : [caller];
-      const keys = Object.fromEntries(
-        visible.map((k) => [k.name, { ...meter.report(k.name), budgetUsd: k.budgetUsd ?? null }]),
+      const entries = await Promise.all(
+        visible.map(async (k) => [
+          k.name,
+          {
+            ...meter.report(k.name),
+            budgetUsd: k.budgetUsd ?? null,
+            budgetSpentUsd: await budgetStore.spentUsd(k.name).catch(() => null),
+          },
+        ]),
       );
-      return { keys };
+      return { keys: Object.fromEntries(entries) };
     });
   });
 

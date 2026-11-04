@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { trace, type Span, type Tracer } from "@opentelemetry/api";
 import type { MessagesRequest, MessagesResponse } from "./api.js";
+import type { BudgetStore } from "./budget/store.js";
 import { cacheKey, isCacheable, type CacheStore } from "./cache.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
 import { GatewayError } from "./errors.js";
@@ -39,10 +41,11 @@ export interface GatewayDeps {
   router: Router;
   limiter: RateLimiter;
   meter: UsageMeter;
+  budgets: BudgetStore;
   guardrails: Guardrail[];
   cache: CacheStore;
   metrics: Metrics;
-  /** Called when a dependency that may fail open (the cache) fails. */
+  /** Called when a best-effort dependency fails (cache, budget settlement). */
   onDegraded?: (what: string, err: unknown) => void;
   tracer?: Tracer;
   now?: () => number;
@@ -113,7 +116,7 @@ export class Gateway {
     try {
       return await this.serveComplete(key, body, signal, admission, startedAt);
     } catch (err) {
-      this.deps.meter.release(key.name, admission.reservedUsd);
+      await this.settleBudget(key, admission, 0);
       throw err;
     }
   }
@@ -135,7 +138,7 @@ export class Gateway {
     if (storeKey) this.deps.metrics.cacheLookups.inc({ result: cached ? "hit" : "miss" });
     if (cached) {
       await this.deps.limiter.reconcile(key, admission.estimate, 0); // no upstream tokens were used
-      this.deps.meter.release(key.name, admission.reservedUsd);
+      await this.settleBudget(key, admission, 0);
       this.deps.meter.record(key.name, {
         model: cached.model,
         inputTokens: 0,
@@ -180,7 +183,7 @@ export class Gateway {
       const request = guarded.value;
       routed = await this.track(key, () => this.deps.router.openStream(request.model, toUpstream(request), signal));
     } catch (err) {
-      this.deps.meter.release(key.name, admission.reservedUsd);
+      await this.settleBudget(key, admission, 0);
       throw err;
     }
     const { target, attempts } = routed;
@@ -270,24 +273,23 @@ export class Gateway {
    * The budget check reserves the request's worst-case cost: estimated input
    * plus `max_tokens` of output, at the most expensive model the alias may use.
    * Concurrent requests see each other's reservations, so together they can
-   * never spend more than the budget. The check and the reservation happen
-   * with no `await` in between, so no other request can slip in.
+   * never spend more than the budget. The store makes check-and-reserve atomic
+   * (in Redis, across every gateway instance).
    */
   private async admit(key: VirtualKey, body: MessagesRequest): Promise<Admission> {
     const inputTokens = estimateTokens(promptText(body));
-    const estimate = inputTokens + body.max_tokens;
-    const { meter } = this.deps;
+    const admission: Admission = { estimate: inputTokens + body.max_tokens };
 
-    let reservedUsd = 0;
     if (key.budgetUsd !== undefined) {
       const worstCase = Math.max(
         ...this.deps.router
           .targetsFor(body.model)
           .map((t) => costUsd(this.deps.config.prices, t.model, inputTokens, body.max_tokens)),
       );
-      const committed = meter.spentUsd(key.name) + meter.reservedUsd(key.name);
-      if (committed + worstCase > key.budgetUsd) {
-        const left = Math.max(0, key.budgetUsd - committed);
+      const reservationId = randomUUID();
+      const result = await this.reserveBudget(key, reservationId, worstCase, key.budgetUsd);
+      if (!result.allowed) {
+        const left = Math.max(0, key.budgetUsd - result.committedUsd);
         throw new GatewayError(
           429,
           "budget_exceeded",
@@ -295,17 +297,41 @@ export class Gateway {
             `(including requests in flight); this request may cost up to $${worstCase.toFixed(6)}`,
         );
       }
-      meter.reserve(key.name, worstCase);
-      reservedUsd = worstCase;
+      admission.reservationId = reservationId;
     }
 
     try {
-      await this.deps.limiter.check(key, estimate);
+      await this.deps.limiter.check(key, admission.estimate);
     } catch (err) {
-      meter.release(key.name, reservedUsd);
+      await this.settleBudget(key, admission, 0);
       throw err;
     }
-    return { estimate, reservedUsd };
+    return admission;
+  }
+
+  /**
+   * A budget is a financial control, so if the store cannot be reached the
+   * request is refused (fail closed). Keys without a budget never get here.
+   */
+  private async reserveBudget(key: VirtualKey, id: string, usd: number, budgetUsd: number) {
+    try {
+      return await this.deps.budgets.reserve(key.name, id, usd, budgetUsd);
+    } catch (err) {
+      this.deps.onDegraded?.("budget check", err);
+      throw new GatewayError(503, "api_error", "Budget store unavailable; refusing requests for budgeted keys");
+    }
+  }
+
+  /** Replaces the reservation with the real cost (0 when the request failed or was a cache hit). */
+  private async settleBudget(key: VirtualKey, admission: Admission, spentUsd: number): Promise<void> {
+    if (!admission.reservationId) return;
+    try {
+      await this.deps.budgets.settle(key.name, admission.reservationId, spentUsd);
+    } catch (err) {
+      // The call already happened; the best we can do is report it. In Redis the
+      // reservation expires on its own, so the key is not blocked forever.
+      this.deps.onDegraded?.("budget settle", err);
+    }
   }
 
   /** Step 8: reconcile the rate limit, swap the budget reservation for the real cost. */
@@ -319,7 +345,7 @@ export class Gateway {
   ): Promise<void> {
     await this.deps.limiter.reconcile(key, admission.estimate, inputTokens + outputTokens);
     const cost = costUsd(this.deps.config.prices, model, inputTokens, outputTokens);
-    this.deps.meter.release(key.name, admission.reservedUsd);
+    await this.settleBudget(key, admission, cost);
     this.deps.meter.record(key.name, {
       model,
       inputTokens,
@@ -352,8 +378,8 @@ function spanAttributes(key: VirtualKey, body: MessagesRequest) {
 interface Admission {
   /** Estimated tokens taken from the tokens-per-minute bucket: input estimate + max_tokens. */
   estimate: number;
-  /** Worst-case USD reserved against the key's budget (0 without a budget). */
-  reservedUsd: number;
+  /** Set when the key has a budget: the reservation to settle when the request ends. */
+  reservationId?: string;
 }
 
 function promptText(body: MessagesRequest): string {

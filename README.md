@@ -25,13 +25,14 @@ flowchart LR
     res --> anthropic[(AnthropicProvider)]
     rl <-.-> redis[(Redis<br/>optional)]
     cache <-.-> redis
+    budget <-.-> redis
     meter -.-> obs[/logs, /metrics,<br/>traces, /v1/usage/]
 ```
 
 Request flow, in order (see `src/gateway.ts`):
 
 1. **Auth**: the virtual key in `Authorization: Bearer` or `x-api-key` is hashed and matched against configured tenants. Config stores only SHA-256 hashes (`npm run hash-key -- <secret>`).
-2. **Budget**: the request's worst-case cost is reserved against the key's `budgetUsd`; if spend plus in-flight reservations plus this request could exceed it, the answer is `429 budget_exceeded`.
+2. **Budget**: the request's worst-case cost is reserved against the key's `budgetUsd`; if spend plus in-flight reservations plus this request could exceed it, the answer is `429 budget_exceeded`. With Redis, spend and reservations are shared by all instances and survive restarts.
 3. **Rate limit**: requests/min and tokens/min token buckets per key, in memory or in Redis.
 4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`. Optionally the same is applied to replies, including streams.
 5. **Cache**: identical deterministic requests are answered from the cache (in memory, or in Redis to share it across instances). A cache outage is treated as a miss.
@@ -146,7 +147,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 - **Rate limits check an estimate, then reconcile** ([ADR 0003](docs/adr/0003-token-bucket-rate-limits.md)). Exact real token counts are only known after the call. The bucket can go negative, which keeps the long-run rate correct.
 - **The Redis store runs the token bucket in Lua** for atomicity across instances, with Redis `TIME` as the shared clock.
 - **The cache is exact-match, per tenant, temperature 0 only** ([ADR 0004](docs/adr/0004-exact-match-cache.md)). Safe by default; lower hit rate than a shared or semantic cache.
-- **Budgets reserve the worst case.** Each request reserves (estimated input + `max_tokens`) at the priciest model its alias may use, and swaps the reservation for the real cost when it finishes. Concurrent requests can never overshoot the budget together; the price is that a key near its limit is refused slightly earlier than strictly necessary.
+- **Budgets reserve the worst case, atomically.** Each request reserves (estimated input + `max_tokens`) at the priciest model its alias may use, and swaps the reservation for the real cost when it finishes. Concurrent requests can never overshoot the budget together, across instances too: the Redis store checks and reserves in one Lua script, and reservations expire if an instance crashes. If the budget store is unreachable, budgeted keys fail closed (503); unbudgeted keys are unaffected. The price is that a key near its limit is refused slightly earlier than strictly necessary.
 - **One summary log line per request; Prometheus counters; OTel spans per attempt** ([ADR 0005](docs/adr/0005-observability.md)).
 - **Small surface on purpose.** Text-only messages, config-file keys, in-memory usage. Each is listed below as a limitation, not hidden.
 
@@ -154,7 +155,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 - Text-only messages. No tool use, images or documents; the stream chunk model carries text only.
 - Virtual keys live in the config file (as SHA-256 hashes in the default config). There is no key management API; adding or revoking a key means editing config and restarting.
-- Usage, budgets and circuit breakers are in memory and per process. Rate limits and the response cache are shared through Redis when `REDIS_URL` is set. A restart resets spend, so budgets are not durable.
+- Usage statistics (latency percentiles, per-model breakdowns) and circuit breakers are per process and in memory. With `REDIS_URL` set, rate limits, the response cache and budget spend are shared and durable; without it, a restart resets spend.
 - If Redis is unreachable, rate limits fail open (requests are allowed and a warning is logged).
 - Streams cut off midway are metered from an estimate of the text already sent, not from provider-reported usage.
 - PII redaction is regex-based: emails and 10 to 15 digit phone numbers only. It misses names, addresses and unusual formats. Redacting replies (`piiRedactionOutput`) is opt-in; on streams it releases text a word at a time.
@@ -165,8 +166,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Keep budget spend and reservations in Redis (with an atomic Lua reserve), so budgets hold across instances and survive restarts.
-2. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
+1. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
 
 ## Project layout
 
@@ -178,6 +178,7 @@ src/
   router.ts            alias to targets, fallback, retry, breaker, timeout
   resilience/          retry.ts, circuit-breaker.ts, timeout.ts
   rate-limit/          token-bucket.ts (pure math), store.ts, redis-store.ts, limiter.ts
+  budget/              store.ts (interface + memory), redis-store.ts (atomic reserve in Lua)
   cache.ts             cache policy, normalised key, in-memory TTL + LRU store
   redis-cache.ts       shared cache store in Redis
   metering.ts          prices, usage ledger, percentiles

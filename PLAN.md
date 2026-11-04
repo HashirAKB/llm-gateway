@@ -17,7 +17,7 @@ Each milestone: tests first, simplest implementation, all checks green, commit, 
 - [x] N3 Budget reservation for concurrent requests
 - [x] N4 Output guardrails on streams
 - [x] N5 Redis-backed response cache (shared across instances, fails open)
-- [ ] N6 Budget spend and reservations in Redis (atomic reserve, durable across restarts)
+- [x] N6 Budget spend and reservations in Redis (atomic reserve, durable across restarts)
 - [ ] N7 Latency-aware routing
 
 ## Blockers

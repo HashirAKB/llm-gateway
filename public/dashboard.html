@@ -71,7 +71,7 @@
       <tbody id="rows"></tbody>
     </table>
   </div>
-  <footer>Source: GET /v1/usage (in-memory, resets on restart). Latency percentiles cover each key's last 1000 requests. Prometheus metrics: <a href="/metrics">/metrics</a>.</footer>
+  <footer>Source: GET /v1/usage. Request, token and latency figures are per gateway instance; budget use is global when Redis is configured. Latency percentiles cover each key's last 1000 requests. Prometheus metrics: <a href="/metrics">/metrics</a>.</footer>
 </main>
 <script>
   const STORAGE_KEY = "llm-gateway-admin-key";
@@ -118,7 +118,8 @@
         cell(name), cell(fmtInt(k.requests)), cell(fmtInt(k.errors)), cell(fmtPct(k.cacheHitRate)),
         cell(fmtInt(k.latencyMs.p50)), cell(fmtInt(k.latencyMs.p95)),
         cell(fmtInt(k.inputTokens)), cell(fmtInt(k.outputTokens)), cell(fmtUsd(k.costUsd)),
-        budgetCell(k.costUsd, k.budgetUsd),
+        // Budget spend comes from the budget store: with Redis it covers every gateway instance.
+        budgetCell(k.budgetSpentUsd ?? k.costUsd, k.budgetUsd),
       );
       rows.appendChild(tr);
     }

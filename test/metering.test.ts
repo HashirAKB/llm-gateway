@@ -33,8 +33,6 @@ describe("UsageMeter", () => {
     expect(report.costUsd).toBeCloseTo(0.2);
     expect(report.cacheHitRate).toBeCloseTo(1 / 3);
     expect(report.byModel.m1!.requests).toBe(3);
-    expect(meter.spentUsd("app")).toBeCloseTo(0.2);
-    expect(meter.spentUsd("nobody")).toBe(0);
   });
 
   it("reports latency percentiles (nearest rank)", () => {
@@ -67,6 +65,7 @@ describe("usage and budgets through the HTTP API", () => {
     expect(body.keys.app1.requests).toBe(1);
     expect(body.keys.app1.costUsd).toBeGreaterThan(0);
     expect(body.keys.app1.budgetUsd).toBe(0.00006);
+    expect(body.keys.app1.budgetSpentUsd).toBeCloseTo(body.keys.app1.costUsd);
   });
 
   it("an admin key sees every key", async () => {
