@@ -21,7 +21,7 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 |---|---|
 | Upstream LLM in tests, demo and load test | Mocked: `MockProvider`, deterministic, with configurable latency, chunk delay and error rate |
 | Anthropic upstream | Real code using the official SDK, active only with `ANTHROPIC_API_KEY`. Tested offline with a fake `fetch`; not exercised against the live API in this environment |
-| Rate limiting, response cache and budgets in Redis | Real: tested against a local Redis and a Redis service in CI |
+| Rate limiting, response cache and budgets in Redis | Real: contract-tested against a local Redis and a Redis service in CI; shared budgets also checked by hand with two gateway instances on one Redis |
 | Metrics, traces, logs | Real libraries (prom-client, OpenTelemetry SDK, pino). Traces export to Jaeger via OTLP in docker-compose |
 | Prices | Real per-token list prices for the configured Claude models at the time of writing; mock models reuse them so cost numbers are realistic |
 | Docker image | Built and smoke-tested in CI. The development sandbox could not pull base images, so the runtime stage was verified by running the production install locally |
