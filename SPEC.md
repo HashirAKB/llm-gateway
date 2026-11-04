@@ -60,7 +60,7 @@ client. Once streaming has started, an upstream failure is reported as an SSE `e
 
 | Choice | Reason |
 |---|---|
-| TypeScript (strict), Node 20+ | Type safety; the target audience's main language. |
+| TypeScript 6 (strict), Node 22+ | Type safety; the target audience's main language. |
 | Fastify 5 | Fast, first-class pino logging, `inject()` for tests without opening ports. |
 | zod | One schema gives runtime validation and the static type. |
 | vitest | Fast TS-native test runner with fake timers for backoff and breaker tests. |
@@ -98,3 +98,6 @@ client. Once streaming has started, an upstream failure is reported as an SSE `e
 ## Deviations
 
 (Logged here when the environment forces a change from the plan.)
+
+1. **Node 22+ instead of Node 20+.** Node 20 reached end of life in April 2026 and vitest 5 requires Node >= 22.12. CI and Docker use Node 22 LTS.
+2. **TypeScript pinned to 6.0.x.** TypeScript 7 (native compiler) is out, but typescript-eslint 8 supports only `<6.1`.
