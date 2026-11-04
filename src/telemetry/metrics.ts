@@ -80,7 +80,10 @@ export class Metrics {
     registers: [this.registry],
   });
 
-  constructor(breakerStates: () => Record<string, BreakerState>) {
+  constructor(sources: {
+    breakerStates: () => Record<string, BreakerState>;
+    latencyEstimates: () => { provider: string; model: string; ms: number }[];
+  }) {
     new Gauge({
       name: "gateway_circuit_breaker_state",
       help: "Circuit breaker state per provider: 0 closed, 1 half-open, 2 open",
@@ -88,9 +91,18 @@ export class Metrics {
       registers: [this.registry],
       // Read at scrape time, so the value is always current.
       collect() {
-        for (const [provider, state] of Object.entries(breakerStates())) {
+        for (const [provider, state] of Object.entries(sources.breakerStates())) {
           this.set({ provider }, BREAKER_STATE_VALUE[state]);
         }
+      },
+    });
+    new Gauge({
+      name: "gateway_target_latency_ewma_seconds",
+      help: "Smoothed latency to first byte per target, as used by latency-aware routing",
+      labelNames: ["provider", "model"] as const,
+      registers: [this.registry],
+      collect() {
+        for (const { provider, model, ms } of sources.latencyEstimates()) this.set({ provider, model }, ms / 1000);
       },
     });
     collectDefaultMetrics({ register: this.registry });

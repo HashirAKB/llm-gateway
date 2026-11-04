@@ -18,7 +18,7 @@ Each milestone: tests first, simplest implementation, all checks green, commit, 
 - [x] N4 Output guardrails on streams
 - [x] N5 Redis-backed response cache (shared across instances, fails open)
 - [x] N6 Budget spend and reservations in Redis (atomic reserve, durable across restarts)
-- [ ] N7 Latency-aware routing
+- [x] N7 Latency-aware routing (per-route strategy, EWMA, epsilon-greedy exploration)
 
 ## Blockers
 

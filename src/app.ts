@@ -74,9 +74,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const rateLimitStore = options.rateLimitStore ?? new MemoryRateLimitStore();
   const cacheStore = options.cacheStore ?? new MemoryCacheStore(config.cache);
   const budgetStore = options.budgetStore ?? new MemoryBudgetStore();
-  // The router needs the metrics and the metrics need the router (breaker gauge),
-  // so the gauge reads the router lazily through this arrow function.
-  const metrics = new Metrics(() => router.breakerStates());
+  // The router needs the metrics and the metrics need the router (gauges),
+  // so the gauges read the router lazily through these arrow functions.
+  const metrics = new Metrics({
+    breakerStates: () => router.breakerStates(),
+    latencyEstimates: () => router.latency.all(),
+  });
   const router = new Router(config.routes, providers, config.resilience, {
     tracer: tracing.tracer,
     onAttemptError: (t, err) =>

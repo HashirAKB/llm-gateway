@@ -171,3 +171,12 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D36. Budget store outage fails closed; rate limits and cache fail open
 - **Decision:** if the budget store cannot be reached, requests from keys that have a budget get 503; keys without a budget carry on. A failed settlement is logged (the Redis reservation then expires by itself).
 - **Why:** budgets are a financial control, so overspending is worse than refusing. Rate limits and the cache protect capacity and latency, where availability matters more.
+
+## D37. Latency-aware routing is a per-route strategy with EWMA and epsilon-greedy exploration
+- **Decision:** routes accept a plain list (ordered, unchanged) or `{ strategy: "latency", targets, explorationRate }`. Successful attempts feed an EWMA (alpha 0.3) of time to first byte per target. Order: unmeasured targets first, then lowest estimate; with probability `explorationRate` (default 0.05) config order is used instead. The estimates are exported as `gateway_target_latency_ewma_seconds`.
+- **Alternatives:** rank by p95 over a sliding window (more memory and state per target); make every route latency-aware (would override deliberate quality ordering such as Opus before Sonnet).
+- **Why:** EWMA is O(1), easy to explain, and reacts within a few requests. Opt-in keeps the meaning of existing routes. Exploration prevents a once-slow target from being starved forever.
+
+## D38. Stopping point for follow-up work
+- **Decision:** after N7 the README's "What I'd do next" list was replaced by larger items (tool use, key management API, semantic cache, Prometheus-backed dashboard, shared breakers) that are not started tonight.
+- **Why:** each is a design change rather than a contained improvement, and adding them unasked would work against the brief's "minimal code for the spec, no speculative abstractions". They are recorded as the honest next steps.

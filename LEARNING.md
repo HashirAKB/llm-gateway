@@ -18,6 +18,8 @@ A virtual key is a credential the gateway issues to a client app. It is not a pr
 
 Clients ask for `fast` or `smart`, not a vendor model id. `config/gateway.json` maps each alias to an ordered list of targets (`provider` + `model`). Changing which model serves `smart` is a config change, not a deploy of every client. The order is the fallback order. See `Router.targetsFor` in `src/router.ts`.
 
+A route can also say `"strategy": "latency"`. Then the router keeps an *exponentially weighted moving average* (EWMA) of each target's time to first byte (`src/routing/latency.ts`): `estimate += alpha * (sample - estimate)`. Recent samples count most and memory is constant. Targets are tried lowest estimate first, never-measured targets before all others. With a small probability (`explorationRate`) it uses config order instead: without that, a target that was slow once would never get traffic again and so never prove it has recovered. This is the explore/exploit trade-off of multi-armed bandits, in its simplest form (epsilon-greedy).
+
 ### 1.4 Retryable vs non-retryable errors
 
 Retrying is only useful if trying again can succeed. A 429 (rate limited), 529 (overloaded), 5xx, network error or timeout is *transient*: the same request may work a moment later. A 400 (bad request) or 401 (bad credentials) will fail the same way every time, so retrying wastes time and money. The gateway decides this once, when it converts provider errors into `ProviderError` with a `retryable` flag (`isRetryableStatus` in `src/errors.ts`, `toProviderError` in `src/providers/anthropic.ts`).
@@ -88,7 +90,7 @@ Read in this order. Each file is small; the comment at the top of each says what
 | 6 | `src/resilience/timeout.ts` | Deadlines with `AbortSignal`, `Promise.race`, and `AbortSignal.any`. |
 | 7 | `src/resilience/retry.ts` | Backoff with full jitter; retrying only the right errors. |
 | 8 | `src/resilience/circuit-breaker.ts` | A state machine driven by timestamps; the half-open single probe. |
-| 9 | `src/router.ts` | How the four resilience layers compose, and the first-byte rule for streams. |
+| 9 | `src/router.ts` and `src/routing/latency.ts` | How the four resilience layers compose, the first-byte rule for streams, and latency-aware ordering with an EWMA. |
 | 10 | `src/rate-limit/token-bucket.ts` | The algorithm as a pure function. |
 | 11 | `src/rate-limit/store.ts` and `redis-store.ts` | One interface, two stores; atomicity with Lua. |
 | 12 | `src/rate-limit/limiter.ts` | Two buckets per key; estimate then reconcile. |
@@ -178,6 +180,9 @@ Inject the clock and the randomness. `CircuitBreaker` takes `now`, `retry` takes
 
 **15. What would change to run this with many instances behind a load balancer?**
 Rate limits already work across instances via Redis. The response cache is shared through Redis too (`RedisCacheStore`). Budgets too: `RedisBudgetStore` keeps spend and reservations in Redis and does check-and-reserve in one Lua script. Still per instance: usage statistics (latency percentiles) and circuit breakers. I would ship usage statistics to Prometheus only, and accept per-instance breakers since each instance learns about an outage within a few requests anyway. Sticky sessions are not needed because no per-client state remains in the process.
+
+**16. How does latency-aware routing avoid getting stuck on one target?**
+Two mechanisms. Targets with no measurement are tried first, so every target gets measured at least once. And with probability `explorationRate` the router ignores the estimates and uses config order, which keeps sending a trickle of traffic to slower targets; if one has recovered, its EWMA drops and it wins again. Failures do not update the EWMA, they are handled by retries, fallback and the breaker, so the two signals stay separate.
 
 ## Part 5. Hands-on exercises
 

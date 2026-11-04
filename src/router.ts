@@ -1,10 +1,11 @@
 import { trace, type Tracer } from "@opentelemetry/api";
-import type { ResilienceConfig, Target } from "./config.js";
+import type { ResilienceConfig, Route, Target } from "./config.js";
 import { GatewayError, ProviderError } from "./errors.js";
 import type { Provider, ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
 import { CircuitBreaker, type BreakerState } from "./resilience/circuit-breaker.js";
 import { retry } from "./resilience/retry.js";
 import { withIdleTimeout, withTimeout } from "./resilience/timeout.js";
+import { LatencyTracker } from "./routing/latency.js";
 import { markSpanError } from "./telemetry/tracing.js";
 
 /** An open upstream stream whose first chunk (`start`) has already arrived. */
@@ -49,9 +50,10 @@ export interface RouterHooks {
 export class Router {
   private readonly breakers = new Map<string, CircuitBreaker>();
   private readonly tracer: Tracer;
+  readonly latency = new LatencyTracker();
 
   constructor(
-    private readonly routes: Record<string, Target[]>,
+    private readonly routes: Record<string, Route>,
     private readonly providers: Map<string, Provider>,
     private readonly resilience: ResilienceConfig,
     private readonly hooks: RouterHooks = {},
@@ -60,18 +62,39 @@ export class Router {
     this.tracer = hooks.tracer ?? trace.getTracer("llm-gateway");
   }
 
-  /** Targets for an alias, skipping providers that are not configured (e.g. no API key). */
+  /** Targets for an alias in configured order, skipping providers that are not configured (e.g. no API key). */
   targetsFor(alias: string): Target[] {
-    const targets = this.routes[alias];
-    if (!targets) {
-      const known = Object.keys(this.routes).join(", ");
-      throw new GatewayError(400, "invalid_request_error", `Unknown model "${alias}". Available: ${known}`);
-    }
-    const available = targets.filter((t) => this.providers.has(t.provider));
+    const route = this.route(alias);
+    const available = route.targets.filter((t) => this.providers.has(t.provider));
     if (available.length === 0) {
       throw new GatewayError(503, "api_error", `No provider is configured for model "${alias}"`);
     }
     return available;
+  }
+
+  /**
+   * The order to try targets in for this request. "ordered" routes use config
+   * order. "latency" routes put the lowest smoothed latency first, with targets
+   * never measured before ahead of all others (so they get measured), except
+   * on an exploration roll, which keeps config order.
+   */
+  private attemptOrder(alias: string): Target[] {
+    const route = this.route(alias);
+    const targets = this.targetsFor(alias);
+    if (route.strategy === "ordered") return targets;
+    const random = this.hooks.random ?? Math.random;
+    if (random() < route.explorationRate) return targets;
+    const rank = (t: Target) => this.latency.estimate(t) ?? -1; // unmeasured first
+    return [...targets].sort((a, b) => rank(a) - rank(b)); // stable: ties keep config order
+  }
+
+  private route(alias: string): Route {
+    const route = this.routes[alias];
+    if (!route) {
+      const known = Object.keys(this.routes).join(", ");
+      throw new GatewayError(400, "invalid_request_error", `Unknown model "${alias}". Available: ${known}`);
+    }
+    return route;
   }
 
   /** States of every breaker created so far (a breaker is created on first use). */
@@ -116,7 +139,7 @@ export class Router {
     const failures: string[] = [];
     let attempts = 0;
 
-    const targets = this.targetsFor(alias);
+    const targets = this.attemptOrder(alias);
     for (const [index, target] of targets.entries()) {
       const provider = this.providers.get(target.provider)!;
       const breaker = this.breaker(target.provider);
@@ -147,12 +170,18 @@ export class Router {
     throw new GatewayError(502, "api_error", `All upstream targets failed. ${failures.join("; ")}`);
   }
 
-  /** One real upstream call, wrapped in its own span. */
+  /**
+   * One real upstream call, wrapped in its own span. Successful calls feed the
+   * latency tracker (for streams this is the time to the first chunk).
+   */
   private attempt<T>(target: Target, attempt: number, call: () => Promise<T>): Promise<T> {
     const attributes = { "upstream.provider": target.provider, "upstream.model": target.model, "upstream.attempt": attempt };
     return this.tracer.startActiveSpan("upstream.attempt", { attributes }, async (span) => {
+      const startedAt = performance.now();
       try {
-        return await call();
+        const result = await call();
+        this.latency.record(target, performance.now() - startedAt);
+        return result;
       } catch (err) {
         markSpanError(span, err);
         if (err instanceof ProviderError) this.hooks.onAttemptError?.(target, err);

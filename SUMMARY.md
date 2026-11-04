@@ -5,7 +5,7 @@
 A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between client apps and LLM providers:
 
 - `POST /v1/messages`, a Messages-style API with JSON and SSE streaming, authenticated by per-app virtual keys stored as SHA-256 hashes.
-- Routing from aliases (`fast`, `smart`) to ordered provider models, with fallback.
+- Routing from aliases (`fast`, `smart`) to provider models with fallback, in config order or, per route, fastest first by an EWMA of recent latency with epsilon-greedy exploration.
 - Resilience per target: retries with exponential backoff and full jitter (retryable errors only), per-attempt timeouts via `AbortSignal`, and a per-provider circuit breaker (closed, open, half-open). Streams are retried only before the first byte, then guarded by an idle timeout between chunks.
 - Per-key token-bucket rate limits for requests/min and tokens/min, with an in-memory store and an atomic Redis (Lua) store that pass the same contract tests.
 - An exact-match response cache keyed on a normalised request hash, scoped per tenant, limited to deterministic non-streaming requests; in memory (TTL + LRU) or shared through Redis, failing open as a miss.

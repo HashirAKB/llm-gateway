@@ -22,6 +22,15 @@ const config = parseConfig({
       { provider: "broken", model: "broken-model" },
       { provider: "mock", model: "mock-smart" },
     ],
+    // The same model in two "regions"; send each request to whichever is faster lately.
+    balanced: {
+      strategy: "latency",
+      explorationRate: 0,
+      targets: [
+        { provider: "region-a", model: "mock-fast" },
+        { provider: "region-b", model: "mock-fast" },
+      ],
+    },
   },
   prices: {
     "mock-fast": { inputPerMTok: 0.1, outputPerMTok: 0.5 },
@@ -38,6 +47,8 @@ const config = parseConfig({
 const providers = new Map([
   ["mock", new MockProvider({ latencyMs: 30, chunkDelayMs: 10 })],
   ["broken", new MockProvider({ name: "broken", errorRate: 1 })],
+  ["region-a", new MockProvider({ name: "region-a", latencyMs: 80 })],
+  ["region-b", new MockProvider({ name: "region-b", latencyMs: 15 })],
 ]);
 
 const app = buildApp({ config, providers });
@@ -122,7 +133,21 @@ for (let i = 1; i <= 3; i++) {
   console.log(`request ${i}:`, r.status, r.status === 429 ? `${r.json.error.type}: ${r.json.error.message}` : "");
 }
 
-section("8. Usage report for key 'app'");
+section("8. Latency-aware routing: 'balanced' = region-a (80ms) or region-b (15ms)");
+const served: string[] = [];
+for (let i = 0; i < 5; i++) {
+  const r = await post("demo-key-app", { ...ask(`route me ${i}`), model: "balanced" });
+  served.push(r.headers.split(" ")[0]!.replace("provider=", ""));
+}
+console.log("served by:", served.join(", "));
+console.log(
+  (await (await fetch(`${base}/metrics`)).text())
+    .split("\n")
+    .filter((l) => l.startsWith("gateway_target_latency_ewma_seconds{provider=\"region"))
+    .join("\n"),
+);
+
+section("9. Usage report for key 'app'");
 const usage = await (await fetch(`${base}/v1/usage`, { headers: { "x-api-key": "demo-key-app" } })).json();
 const { byModel, ...summary } = usage.keys.app;
 console.log(summary);

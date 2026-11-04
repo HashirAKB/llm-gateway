@@ -36,7 +36,7 @@ Request flow, in order (see `src/gateway.ts`):
 3. **Rate limit**: requests/min and tokens/min token buckets per key, in memory or in Redis.
 4. **Guardrails**: emails and phone numbers in the prompt become `[EMAIL]` and `[PHONE]`. Optionally the same is applied to replies, including streams.
 5. **Cache**: identical deterministic requests are answered from the cache (in memory, or in Redis to share it across instances). A cache outage is treated as a miss.
-6. **Route**: the alias (`fast`, `smart`) maps to an ordered list of provider models. Each target is wrapped in timeout, circuit breaker and retry with backoff and jitter; on failure the next target is tried.
+6. **Route**: the alias (`fast`, `smart`) maps to a list of provider models, tried in config order or, for `"strategy": "latency"` routes, fastest first by smoothed recent latency. Each target is wrapped in timeout, circuit breaker and retry with backoff and jitter; on failure the next target is tried.
 7. **Settle**: real token usage reconciles the rate limit and is priced from the price table.
 
 ## Quickstart
@@ -106,9 +106,14 @@ request 3: 429 Key "tight" exceeded its requests per minute limit
 request 1: 200
 request 2: 200
 request 3: 429 budget_exceeded: Key "poor" has $0.000044 left of its $0.00006 budget (including requests in flight); this request may cost up to $0.000050
+
+=== 8. Latency-aware routing: 'balanced' = region-a (80ms) or region-b (15ms) ===
+served by: region-a, region-b, region-b, region-b, region-b
+gateway_target_latency_ewma_seconds{provider="region-a",model="mock-fast"} 0.0806
+gateway_target_latency_ewma_seconds{provider="region-b",model="mock-fast"} 0.0150
 ```
 
-In step 5, the first request tries the broken provider twice (retry), opens its circuit, and falls back: 3 attempts. Later requests skip the open circuit straight away: 1 attempt, no added latency.
+In step 5, the first request tries the broken provider twice (retry), opens its circuit, and falls back: 3 attempts. Later requests skip the open circuit straight away: 1 attempt, no added latency. In step 8, the first request uses config order, the second measures the other region, and from then on the faster region wins.
 
 The dashboard after some traffic:
 
@@ -141,6 +146,7 @@ Numbers depend on the machine; compare rows with each other rather than with oth
 Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIONS.md](DECISIONS.md).
 
 - **Provider interface with a mock as default** ([ADR 0001](docs/adr/0001-provider-interface-and-mock-first.md)). Everything is testable offline. The cost: SSE is re-rendered from provider-neutral chunks, so only text content is supported.
+- **Latency-aware routing is opt-in per route.** Order usually encodes preference (best model first), so only routes marked `"strategy": "latency"` reorder targets, by an EWMA of time to first byte. A small exploration rate keeps re-measuring slower targets so a recovered one can win again.
 - **Resilience order is fallback > retry > breaker > timeout** ([ADR 0002](docs/adr/0002-resilience-layering.md)). An opening breaker immediately stops retries and moves to the next target. Only retryable errors count against the breaker.
 - **Streams can only be retried before the first byte.** After that, a failure is an SSE `error` event, because sent bytes cannot be taken back. The first byte is bounded by the per-attempt timeout; every later chunk by an idle timeout (`streamIdleTimeoutMs`), so a silent upstream cannot hold a connection forever. Time to first token is its own histogram.
 - **Client disconnects are not upstream failures.** They cancel the upstream call, are never retried, and never count against a circuit breaker.
@@ -166,7 +172,11 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
+1. Support tool use and image content: richer stream chunk types and a fuller request schema.
+2. A key management API (create, rotate, revoke keys at runtime, stored hashed in Redis) instead of editing config.
+3. A semantic cache behind the same `CacheStore` interface: embed prompts, reuse answers above a similarity threshold, opt-in per route.
+4. Build the dashboard on Prometheus queries instead of the in-process meter, so latency percentiles cover all instances.
+5. Share circuit breaker state across instances through Redis, so one instance's discovery of an outage protects the others.
 
 ## Project layout
 
@@ -176,6 +186,7 @@ src/
   app.ts               HTTP layer: auth, routes, SSE rendering, logs, metrics endpoint
   gateway.ts           the request pipeline, step by step
   router.ts            alias to targets, fallback, retry, breaker, timeout
+  routing/latency.ts   EWMA latency per target, for latency-aware routes
   resilience/          retry.ts, circuit-breaker.ts, timeout.ts
   rate-limit/          token-bucket.ts (pure math), store.ts, redis-store.ts, limiter.ts
   budget/              store.ts (interface + memory), redis-store.ts (atomic reserve in Lua)

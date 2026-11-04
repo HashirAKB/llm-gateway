@@ -6,6 +6,21 @@ const TargetSchema = z.object({
   model: z.string().min(1),
 });
 
+/**
+ * A route is either a plain list of targets (tried in that order), or an object
+ * that picks a strategy. "latency" tries the target with the lowest recent
+ * latency first; with probability `explorationRate` it uses the configured
+ * order instead, so slower targets keep getting measured.
+ */
+const RouteSchema = z.union([
+  z.array(TargetSchema).min(1).transform((targets) => ({ strategy: "ordered" as const, targets, explorationRate: 0 })),
+  z.object({
+    strategy: z.enum(["ordered", "latency"]),
+    targets: z.array(TargetSchema).min(1),
+    explorationRate: z.number().min(0).max(1).default(0.05),
+  }),
+]);
+
 const VirtualKeySchema = z
   .object({
     /** The secret the client sends, in plaintext. Convenient for local demos. */
@@ -41,8 +56,8 @@ const PriceSchema = z.object({
 export const ConfigSchema = z
   .object({
     keys: z.array(VirtualKeySchema).min(1),
-    /** Alias -> ordered list of targets. The first healthy target wins. */
-    routes: z.record(z.string(), z.array(TargetSchema).min(1)),
+    /** Alias -> targets to try, with fallback down the list. */
+    routes: z.record(z.string(), RouteSchema),
     mock: z
       .object({
         latencyMs: z.number().nonnegative().default(0),
@@ -99,8 +114,8 @@ export const ConfigSchema = z
       }
     }
     // Fail at startup, not at request time, if a routable model has no price.
-    for (const [alias, targets] of Object.entries(config.routes)) {
-      for (const target of targets) {
+    for (const [alias, route] of Object.entries(config.routes)) {
+      for (const target of route.targets) {
         if (!config.prices[target.model]) {
           ctx.addIssue({
             code: "custom",
@@ -114,6 +129,7 @@ export const ConfigSchema = z
 
 export type GatewayConfig = z.infer<typeof ConfigSchema>;
 export type Target = z.infer<typeof TargetSchema>;
+export type Route = GatewayConfig["routes"][string];
 export type VirtualKey = z.infer<typeof VirtualKeySchema>;
 export type ResilienceConfig = GatewayConfig["resilience"];
 
