@@ -2,41 +2,41 @@
   {
     "scenario": "cache off",
     "description": "every request goes upstream",
-    "requests": 9558,
-    "throughputRps": 955,
-    "p50": 51.3,
-    "p95": 55.5,
-    "p99": 61.7,
+    "requests": 9536,
+    "throughputRps": 951,
+    "p50": 51.5,
+    "p95": 55.3,
+    "p99": 63.9,
     "errorRatePct": 0
   },
   {
     "scenario": "cache on",
     "description": "100 distinct prompts, temperature 0",
-    "requests": 82186,
-    "throughputRps": 8210,
-    "p50": 5.1,
-    "p95": 10.5,
-    "p99": 14.3,
+    "requests": 68447,
+    "throughputRps": 6831,
+    "p50": 6,
+    "p95": 12.1,
+    "p99": 16.5,
     "errorRatePct": 0
   },
   {
     "scenario": "10% errors, no retries",
     "description": "cache off, maxAttempts 1",
-    "requests": 9607,
-    "throughputRps": 960,
-    "p50": 51.6,
-    "p95": 54.4,
-    "p99": 58,
-    "errorRatePct": 10
+    "requests": 9185,
+    "throughputRps": 916,
+    "p50": 52,
+    "p95": 58.8,
+    "p99": 144.2,
+    "errorRatePct": 10.06
   },
   {
     "scenario": "10% errors, retries",
     "description": "cache off, maxAttempts 3, backoff 25-250ms",
-    "requests": 8562,
-    "throughputRps": 855,
-    "p50": 51.1,
-    "p95": 114.7,
-    "p99": 128,
-    "errorRatePct": 0.12
+    "requests": 8533,
+    "throughputRps": 852,
+    "p50": 51.2,
+    "p95": 115.5,
+    "p99": 135.7,
+    "errorRatePct": 0.13
   }
 ]

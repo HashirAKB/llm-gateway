@@ -180,3 +180,10 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D38. Stopping point for follow-up work
 - **Decision:** after N7 the README's "What I'd do next" list was replaced by larger items (tool use, key management API, semantic cache, Prometheus-backed dashboard, shared breakers) that are not started tonight.
 - **Why:** each is a design change rather than a contained improvement, and adding them unasked would work against the brief's "minimal code for the spec, no speculative abstractions". They are recorded as the honest next steps.
+
+## D39. Load test re-run after the follow-up work; variance stated, not hidden
+- **Decision:** regenerated `loadtest/results.md` after N1 to N7 changed the hot path. The cache-on row came out lower (about 6,800 vs 8,200 req/s). Re-running the earlier commit on the same machine gave about 6,700 req/s, so the difference is VM variance, not a regression. The README states the observed range.
+- **Why:** the published numbers should match the published code, and a reviewer should know which row is noisy.
+
+## D40. Removed an accidentally committed Redis snapshot
+- **Decision:** `dump.rdb` (written by a local redis-server started from the repository directory) was committed by mistake in two commits. It held only mock replies and demo budget counters, no secrets, so it was removed from the tree and added to `.gitignore` rather than rewriting published history.

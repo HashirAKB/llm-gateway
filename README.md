@@ -125,18 +125,18 @@ The dashboard after some traffic:
 
 | Scenario | Setup | Requests | Throughput (req/s) | p50 ms | p95 ms | p99 ms | Error rate |
 |---|---|---:|---:|---:|---:|---:|---:|
-| cache off | every request goes upstream | 9558 | 955 | 51.3 | 55.5 | 61.7 | 0% |
-| cache on | 100 distinct prompts, temperature 0 | 82186 | 8210 | 5.1 | 10.5 | 14.3 | 0% |
-| 10% errors, no retries | cache off, maxAttempts 1 | 9607 | 960 | 51.6 | 54.4 | 58 | 10% |
-| 10% errors, retries | cache off, maxAttempts 3, backoff 25 to 250ms | 8562 | 855 | 51.1 | 114.7 | 128 | 0.12% |
+| cache off | every request goes upstream | 9536 | 951 | 51.5 | 55.3 | 63.9 | 0% |
+| cache on | 100 distinct prompts, temperature 0 | 68447 | 6831 | 6 | 12.1 | 16.5 | 0% |
+| 10% errors, no retries | cache off, maxAttempts 1 | 9185 | 916 | 52 | 58.8 | 144.2 | 10.06% |
+| 10% errors, retries | cache off, maxAttempts 3, backoff 25 to 250ms | 8533 | 852 | 51.2 | 115.5 | 135.7 | 0.13% |
 
 Machine: 4 vCPU Intel Xeon @ 2.10GHz, Node 22, logging off.
 
 How to read it:
 
-- **Gateway overhead is small.** With cache off, 50 connections and a 50ms upstream allow at most 1,000 req/s. The gateway reaches 955 req/s with p50 at 51.3ms, so it adds about 1ms per request.
-- **The cache moves the bottleneck from the upstream to the gateway.** With 100 distinct prompts, almost every request after the first 100 is a hit. Throughput rises about 8.6x and p50 falls about 10x. The remaining 5ms is the gateway's own CPU cost (auth, validation, hashing, JSON) under 50 concurrent connections.
-- **Retries trade tail latency for reliability.** With 10% injected failures and no retries, clients see 10% errors. With up to 3 attempts, the error rate drops to 0.12% (theory: 0.1^3 = 0.1%). The cost is in the tail: about 10% of requests pay one backoff and a second upstream call, so p95 rises from 55ms to 115ms. p50 is unchanged.
+- **Gateway overhead is small.** With cache off, 50 connections and a 50ms upstream allow at most 1,000 req/s. The gateway reaches 951 req/s with p50 at 51.5ms, so it adds about 1 to 2ms per request.
+- **The cache moves the bottleneck from the upstream to the gateway.** With 100 distinct prompts, almost every request after the first 100 is a hit. Throughput rises about 7x and p50 falls about 9x. The remaining 6ms is the gateway's own CPU cost (auth, validation, hashing, JSON) under 50 concurrent connections. This row is CPU-bound, so it is the noisiest: across runs on this shared VM it ranged from about 6,000 to 8,200 req/s, including when re-running an older commit.
+- **Retries trade tail latency for reliability.** With 10% injected failures and no retries, clients see 10% errors. With up to 3 attempts, the error rate drops to 0.13% (theory: 0.1^3 = 0.1%). The cost is in the tail: about 10% of requests pay one backoff and a second upstream call, so p95 rises from about 59ms to 116ms. p50 is unchanged.
 - **The circuit breaker stayed closed** during the 10% error runs: 5 consecutive failures at a 10% rate are rare. It is there for outages, not for background noise.
 
 Numbers depend on the machine; compare rows with each other rather than with other hardware.

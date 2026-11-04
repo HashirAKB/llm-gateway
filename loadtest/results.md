@@ -7,7 +7,7 @@ Latencies are client-observed, in milliseconds. Error rate is the share of non-2
 
 | Scenario | Setup | Requests | Throughput (req/s) | p50 | p95 | p99 | Error rate |
 |---|---|---:|---:|---:|---:|---:|---:|
-| cache off | every request goes upstream | 9558 | 955 | 51.3 | 55.5 | 61.7 | 0% |
-| cache on | 100 distinct prompts, temperature 0 | 82186 | 8210 | 5.1 | 10.5 | 14.3 | 0% |
-| 10% errors, no retries | cache off, maxAttempts 1 | 9607 | 960 | 51.6 | 54.4 | 58 | 10% |
-| 10% errors, retries | cache off, maxAttempts 3, backoff 25-250ms | 8562 | 855 | 51.1 | 114.7 | 128 | 0.12% |
+| cache off | every request goes upstream | 9536 | 951 | 51.5 | 55.3 | 63.9 | 0% |
+| cache on | 100 distinct prompts, temperature 0 | 68447 | 6831 | 6 | 12.1 | 16.5 | 0% |
+| 10% errors, no retries | cache off, maxAttempts 1 | 9185 | 916 | 52 | 58.8 | 144.2 | 10.06% |
+| 10% errors, retries | cache off, maxAttempts 3, backoff 25-250ms | 8533 | 852 | 51.2 | 115.5 | 135.7 | 0.13% |

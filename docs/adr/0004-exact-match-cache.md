@@ -17,6 +17,6 @@ Many LLM workloads repeat identical prompts (classification, templated questions
 
 ## Consequences
 
-- In the load test with 100 distinct prompts, throughput rises from about 955 to about 8,200 requests/s and p50 drops from about 51ms to about 5ms.
+- In the load test with 100 distinct prompts, throughput rises from about 951 to about 6,831 requests/s and p50 drops from about 52ms to about 6ms.
 - Per-tenant scoping lowers the hit rate compared to a global cache.
 - With the memory store the cache is per process and lost on restart; with Redis it is shared and survives gateway restarts. Semantic caching is a future option.
