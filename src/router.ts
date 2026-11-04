@@ -1,9 +1,11 @@
+import { trace, type Tracer } from "@opentelemetry/api";
 import type { ResilienceConfig, Target } from "./config.js";
 import { GatewayError, ProviderError } from "./errors.js";
 import type { Provider, ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
 import { CircuitBreaker, type BreakerState } from "./resilience/circuit-breaker.js";
 import { retry } from "./resilience/retry.js";
 import { withTimeout } from "./resilience/timeout.js";
+import { markSpanError } from "./telemetry/tracing.js";
 
 /** An open upstream stream whose first chunk (`start`) has already arrived. */
 export interface OpenStream {
@@ -23,7 +25,9 @@ export interface RouterHooks {
   now?: () => number;
   random?: () => number;
   sleep?: (ms: number) => Promise<unknown>;
-  /** Observability callbacks (wired to metrics in app.ts). */
+  /** Observability (wired to metrics and tracing in app.ts). */
+  tracer?: Tracer;
+  onAttemptError?: (target: Target, err: ProviderError) => void;
   onRetry?: (target: Target) => void;
   onFallback?: (failed: Target, err: ProviderError) => void;
 }
@@ -43,13 +47,17 @@ export interface RouterHooks {
  */
 export class Router {
   private readonly breakers = new Map<string, CircuitBreaker>();
+  private readonly tracer: Tracer;
 
   constructor(
     private readonly routes: Record<string, Target[]>,
     private readonly providers: Map<string, Provider>,
     private readonly resilience: ResilienceConfig,
     private readonly hooks: RouterHooks = {},
-  ) {}
+  ) {
+    // Without an explicit tracer, use the global one (a no-op unless an SDK is registered).
+    this.tracer = hooks.tracer ?? trace.getTracer("llm-gateway");
+  }
 
   /** Targets for an alias, skipping providers that are not configured (e.g. no API key). */
   targetsFor(alias: string): Target[] {
@@ -67,6 +75,11 @@ export class Router {
 
   breakerState(provider: string): BreakerState {
     return this.breaker(provider).state;
+  }
+
+  /** States of every breaker created so far, for the metrics gauge. */
+  breakerStates(): Record<string, BreakerState> {
+    return Object.fromEntries([...this.breakers].map(([name, breaker]) => [name, breaker.state]));
   }
 
   complete(alias: string, req: UpstreamRequest, signal: AbortSignal): Promise<Routed<ProviderResponse>> {
@@ -104,10 +117,12 @@ export class Router {
       const breaker = this.breaker(target.provider);
       try {
         const value = await retry(
-          () =>
+          (attempt) =>
             breaker.execute(() => {
               attempts += 1;
-              return withTimeout((s) => call(provider, target.model, s), this.resilience.timeoutMs, signal);
+              return this.attempt(target, attempt, () =>
+                withTimeout((s) => call(provider, target.model, s), this.resilience.timeoutMs, signal),
+              );
             }),
           {
             ...this.resilience.retry,
@@ -125,6 +140,22 @@ export class Router {
       }
     }
     throw new GatewayError(502, "api_error", `All upstream targets failed. ${failures.join("; ")}`);
+  }
+
+  /** One real upstream call, wrapped in its own span. */
+  private attempt<T>(target: Target, attempt: number, call: () => Promise<T>): Promise<T> {
+    const attributes = { "upstream.provider": target.provider, "upstream.model": target.model, "upstream.attempt": attempt };
+    return this.tracer.startActiveSpan("upstream.attempt", { attributes }, async (span) => {
+      try {
+        return await call();
+      } catch (err) {
+        markSpanError(span, err);
+        if (err instanceof ProviderError) this.hooks.onAttemptError?.(target, err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }
 
   private breaker(provider: string): CircuitBreaker {

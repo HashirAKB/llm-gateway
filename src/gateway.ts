@@ -1,3 +1,4 @@
+import { trace, type Span, type Tracer } from "@opentelemetry/api";
 import type { MessagesRequest, MessagesResponse } from "./api.js";
 import { ResponseCache, cacheKey, isCacheable } from "./cache.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
@@ -7,6 +8,8 @@ import { UsageMeter, costUsd } from "./metering.js";
 import type { ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
 import type { RateLimiter } from "./rate-limit/limiter.js";
 import type { Router } from "./router.js";
+import type { Metrics } from "./telemetry/metrics.js";
+import { markSpanError } from "./telemetry/tracing.js";
 import { estimateTokens } from "./tokens.js";
 
 export type CacheStatus = "HIT" | "MISS" | "SKIP";
@@ -36,6 +39,8 @@ export interface GatewayDeps {
   limiter: RateLimiter;
   meter: UsageMeter;
   guardrails: Guardrail[];
+  metrics: Metrics;
+  tracer?: Tracer;
   now?: () => number;
 }
 
@@ -56,21 +61,60 @@ export interface GatewayDeps {
 export class Gateway {
   private readonly cache: ResponseCache;
   private readonly now: () => number;
+  private readonly tracer: Tracer;
 
   constructor(private readonly deps: GatewayDeps) {
     this.now = deps.now ?? Date.now;
     this.cache = new ResponseCache(deps.config.cache, this.now);
+    this.tracer = deps.tracer ?? trace.getTracer("llm-gateway");
   }
 
-  async complete(key: VirtualKey, body: MessagesRequest, signal: AbortSignal): Promise<CompleteResult> {
+  /** A JSON request, inside a `gateway.request` span. */
+  complete(key: VirtualKey, body: MessagesRequest, signal: AbortSignal): Promise<CompleteResult> {
+    return this.tracer.startActiveSpan("gateway.request", { attributes: spanAttributes(key, body) }, async (span) => {
+      try {
+        const result = await this.runComplete(key, body, signal);
+        span.setAttributes({
+          "gateway.cache": result.cache,
+          "gateway.attempts": result.attempts,
+          "gateway.output_tokens": result.response.usage.output_tokens,
+        });
+        return result;
+      } catch (err) {
+        markSpanError(span, err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
+  }
+
+  /**
+   * A streaming request. The span stays open until the stream has been fully
+   * consumed (or fails), so its duration covers the whole response.
+   */
+  stream(key: VirtualKey, body: MessagesRequest, signal: AbortSignal): Promise<StreamResult> {
+    return this.tracer.startActiveSpan("gateway.request", { attributes: spanAttributes(key, body) }, async (span) => {
+      try {
+        return await this.runStream(key, body, signal, span);
+      } catch (err) {
+        markSpanError(span, err);
+        span.end();
+        throw err;
+      }
+    });
+  }
+
+  private async runComplete(key: VirtualKey, body: MessagesRequest, signal: AbortSignal): Promise<CompleteResult> {
     const startedAt = this.now();
     const estimate = await this.admit(key, body); // steps 1-2
-    const guarded = runGuardrails(this.deps.guardrails, "before", body); // step 3
+    const guarded = this.guardInput(body); // step 3
     const request = guarded.value;
 
     // Step 4. The key is computed on the guarded request, so redacted prompts share entries.
     const storeKey = isCacheable(request, this.deps.config.cache) ? cacheKey(key.name, request) : undefined;
     const cached = storeKey ? this.cache.get(storeKey) : undefined;
+    if (storeKey) this.deps.metrics.cacheLookups.inc({ result: cached ? "hit" : "miss" });
     if (cached) {
       await this.deps.limiter.reconcile(key, estimate, 0); // no upstream tokens were used
       this.deps.meter.record(key.name, {
@@ -105,10 +149,10 @@ export class Gateway {
     };
   }
 
-  async stream(key: VirtualKey, body: MessagesRequest, signal: AbortSignal): Promise<StreamResult> {
+  private async runStream(key: VirtualKey, body: MessagesRequest, signal: AbortSignal, span: Span): Promise<StreamResult> {
     const startedAt = this.now();
     const estimate = await this.admit(key, body);
-    const guarded = runGuardrails(this.deps.guardrails, "before", body);
+    const guarded = this.guardInput(body);
     const request = guarded.value;
 
     const routed = await this.track(key, () => this.deps.router.openStream(request.model, toUpstream(request), signal));
@@ -120,12 +164,30 @@ export class Gateway {
     const settle = (outputTokens: number) =>
       this.settle(key, estimate, target.model, start.inputTokens, outputTokens, startedAt);
     async function* chunks(): AsyncGenerator<StreamChunk> {
-      for (let next = await rest.next(); !next.done; next = await rest.next()) {
-        if (next.value.type === "end") await settle(next.value.outputTokens);
-        yield next.value;
+      try {
+        for (let next = await rest.next(); !next.done; next = await rest.next()) {
+          if (next.value.type === "end") {
+            await settle(next.value.outputTokens);
+            span.setAttribute("gateway.output_tokens", next.value.outputTokens);
+          }
+          yield next.value;
+        }
+      } catch (err) {
+        markSpanError(span, err);
+        throw err;
+      } finally {
+        span.end();
       }
     }
+    span.setAttributes({ "gateway.cache": "SKIP", "gateway.attempts": attempts });
     return { target, attempts, start, chunks: chunks(), guardrailFindings: guarded.findings };
+  }
+
+  /** Step 3. */
+  private guardInput(body: MessagesRequest) {
+    const guarded = runGuardrails(this.deps.guardrails, "before", body);
+    this.deps.metrics.guardrailFindings.inc(guarded.findings);
+    return guarded;
   }
 
   /** Steps 1 and 2. Returns the token estimate, so `settle` can reconcile it. */
@@ -153,14 +215,19 @@ export class Gateway {
     startedAt: number,
   ): Promise<void> {
     await this.deps.limiter.reconcile(key, estimate, inputTokens + outputTokens);
+    const cost = costUsd(this.deps.config.prices, model, inputTokens, outputTokens);
     this.deps.meter.record(key.name, {
       model,
       inputTokens,
       outputTokens,
-      costUsd: costUsd(this.deps.config.prices, model, inputTokens, outputTokens),
+      costUsd: cost,
       latencyMs: this.now() - startedAt,
       cached: false,
     });
+    const { metrics } = this.deps;
+    metrics.tokens.inc({ key: key.name, model, direction: "input" }, inputTokens);
+    metrics.tokens.inc({ key: key.name, model, direction: "output" }, outputTokens);
+    metrics.costUsd.inc({ key: key.name, model }, cost);
   }
 
   /** Counts a failed upstream call against the key, then rethrows. */
@@ -172,6 +239,10 @@ export class Gateway {
       throw err;
     }
   }
+}
+
+function spanAttributes(key: VirtualKey, body: MessagesRequest) {
+  return { "gateway.key": key.name, "gateway.model": body.model, "gateway.stream": body.stream ?? false };
 }
 
 /** Input text plus the maximum output: a conservative guess before the call. */

@@ -88,3 +88,25 @@ Decisions made while building without the owner available. Each entry: decision,
 ## D18. Usage visibility: own key, or all keys for admin keys
 - **Decision:** `GET /v1/usage` returns the caller's usage; a key with `admin: true` sees every configured key. The dashboard uses an admin key.
 - **Why:** smallest change that keeps tenants from reading each other's spend.
+
+## D19. OpenTelemetry 3.x packages with `@opentelemetry/api` 1.10
+- **Decision:** use `@opentelemetry/sdk-trace` 3.0 (the renamed `sdk-trace-base`), `context-async-hooks` 3.0, `resources` 3.0, `exporter-trace-otlp-http` 0.300.
+- **Alternatives:** the 2.12 line with api 1.9.
+- **Why:** the 2.x SDK needs api < 1.10 while the Anthropic SDK pulls api 1.10, and npm refused the mix. The 3.x line agrees on api 1.10.
+
+## D20. One summary log line per request; Fastify's default request logs off
+- **Decision:** `disableRequestLogging: true` and a single `gateway request` line from `onResponse` with request id, key, alias, status, duration, provider, upstream model, attempts and cache status.
+- **Alternatives:** keep Fastify's "incoming request" and "request completed" lines too.
+- **Why:** one line per request with all routing facts is easier to query, and headers (which carry keys) are never logged.
+
+## D21. Explicit tracer, global async context
+- **Decision:** the tracer is created per app and passed into `Router` and `Gateway`. The async context manager is registered globally once, so child spans find their parent across `await`.
+- **Why:** tests get isolated in-memory exporters; production code does not rely on a global tracer provider.
+
+## D22. Dashboard is a single static HTML file
+- **Decision:** `public/dashboard.html`, vanilla JS polling `GET /v1/usage` with an admin key every 5 seconds.
+- **Alternatives:** a React app.
+- **Why:** no build step or extra dependencies, and it renders with `textContent` only, so it is safe by construction.
+
+## D23. `/metrics` is unauthenticated
+- **Why:** this is the usual setup for a scrape endpoint on an internal network. It contains key names and model names, but no secrets or prompts. In production it would sit on a separate internal port.

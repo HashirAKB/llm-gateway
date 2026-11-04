@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import type { Writable } from "node:stream";
+import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MessagesRequestSchema, type MessagesRequest } from "./api.js";
 import type { GatewayConfig, Target, VirtualKey } from "./config.js";
@@ -11,21 +15,39 @@ import { RateLimiter } from "./rate-limit/limiter.js";
 import { MemoryRateLimitStore, type RateLimitStore } from "./rate-limit/store.js";
 import { Router } from "./router.js";
 import { writeSse } from "./sse.js";
+import { Metrics } from "./telemetry/metrics.js";
+import { createTracing } from "./telemetry/tracing.js";
 
 export interface AppOptions {
   config: GatewayConfig;
   providers: Map<string, Provider>;
   /** Defaults to an in-memory store; server.ts passes a Redis store when REDIS_URL is set. */
   rateLimitStore?: RateLimitStore;
-  logger?: boolean;
+  /** true for JSON logs on stdout; tests pass a stream to capture them. */
+  logger?: boolean | { stream: Writable; level?: string };
+  /** Tests pass an in-memory exporter; otherwise exporters come from OTEL_* env vars. */
+  spanExporter?: SpanExporter;
+}
+
+/** What the request summary log line and the latency histogram report. */
+interface RequestSummary {
+  model?: string;
+  stream?: boolean;
+  provider?: string;
+  upstreamModel?: string;
+  attempts?: number;
+  cache?: string;
 }
 
 declare module "fastify" {
   interface FastifyRequest {
     /** The virtual key that authenticated this request (set by the auth hook). */
     virtualKey?: VirtualKey;
+    summary?: RequestSummary;
   }
 }
+
+const dashboardHtml = readFileSync(new URL("../public/dashboard.html", import.meta.url), "utf8");
 
 /**
  * Builds the Fastify app without starting a listener.
@@ -33,15 +55,48 @@ declare module "fastify" {
  */
 export function buildApp(options: AppOptions): FastifyInstance {
   const { config, providers } = options;
-  const app = Fastify({ logger: options.logger ?? false });
+  const app = Fastify({
+    logger: options.logger ? loggerOptions(options.logger) : false,
+    // Reuse the caller's request id if it sent one, so logs line up across services.
+    requestIdHeader: "x-request-id",
+    requestIdLogLabel: "requestId",
+    genReqId: () => randomUUID(),
+    // We write one summary line per request ourselves (see onResponse below).
+    disableRequestLogging: true,
+  });
+
+  const tracing = createTracing(process.env, options.spanExporter);
   const rateLimitStore = options.rateLimitStore ?? new MemoryRateLimitStore();
-  const router = new Router(config.routes, providers, config.resilience);
+  // The router needs the metrics and the metrics need the router (breaker gauge),
+  // so the gauge reads the router lazily through this arrow function.
+  const metrics = new Metrics(() => router.breakerStates());
+  const router = new Router(config.routes, providers, config.resilience, {
+    tracer: tracing.tracer,
+    onAttemptError: (t, err) =>
+      metrics.upstreamFailures.inc({ provider: t.provider, model: t.model, retryable: String(err.retryable) }),
+    onRetry: (t) => metrics.retries.inc({ provider: t.provider, model: t.model }),
+    onFallback: (t) => metrics.fallbacks.inc({ provider: t.provider, model: t.model }),
+  });
   const meter = new UsageMeter();
   const guardrails: Guardrail[] = config.guardrails.piiRedaction ? [new PiiRedactionGuardrail()] : [];
-  const gateway = new Gateway({ config, router, limiter: new RateLimiter(rateLimitStore), meter, guardrails });
+  const gateway = new Gateway({
+    config,
+    router,
+    limiter: new RateLimiter(rateLimitStore),
+    meter,
+    guardrails,
+    metrics,
+    tracer: tracing.tracer,
+  });
   const keysBySecret = new Map(config.keys.map((k) => [k.key, k]));
 
-  app.addHook("onClose", () => rateLimitStore.close());
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("x-request-id", request.id);
+  });
+  app.addHook("onClose", async () => {
+    await rateLimitStore.close();
+    await tracing.shutdown();
+  });
 
   app.setErrorHandler((err, request, reply) => {
     if (err instanceof GatewayError) {
@@ -57,6 +112,13 @@ export function buildApp(options: AppOptions): FastifyInstance {
 
   app.get("/health", async () => ({ status: "ok" }));
 
+  // Prometheus scrapes this. Unauthenticated, as is usual for an internal port.
+  app.get("/metrics", async (_request, reply) => {
+    return reply.type(metrics.registry.contentType).send(await metrics.registry.metrics());
+  });
+
+  app.get("/dashboard", async (_request, reply) => reply.type("text/html").send(dashboardHtml));
+
   app.register(async (v1) => {
     // Every /v1 route requires a valid virtual key.
     v1.addHook("onRequest", async (request) => {
@@ -66,17 +128,51 @@ export function buildApp(options: AppOptions): FastifyInstance {
       request.virtualKey = key;
     });
 
+    // Runs after the response is fully sent (for streams: after the last byte),
+    // so the duration is what the client experienced.
+    v1.addHook("onResponse", async (request, reply) => {
+      if (request.routeOptions.url !== "/v1/messages") return;
+      const summary = request.summary ?? {};
+      const durationMs = reply.elapsedTime;
+      metrics.requestDuration.observe(
+        {
+          key: request.virtualKey?.name ?? "unknown",
+          model: summary.model ?? "unknown",
+          status: String(reply.statusCode),
+          stream: String(summary.stream ?? false),
+        },
+        durationMs / 1000,
+      );
+      request.log.info(
+        { key: request.virtualKey?.name, status: reply.statusCode, durationMs: Math.round(durationMs), ...summary },
+        "gateway request",
+      );
+    });
+
     v1.post("/v1/messages", async (request, reply) => {
       const key = request.virtualKey!;
       const body = parseBody(request.body);
       const abort = abortOnClientClose(reply);
+      request.summary = { model: body.model, stream: body.stream ?? false };
 
       if (body.stream) {
         const result = await gateway.stream(key, body, abort.signal);
+        Object.assign(request.summary, {
+          provider: result.target.provider,
+          upstreamModel: result.target.model,
+          attempts: result.attempts,
+          cache: "SKIP",
+        });
         return sendStream(request, reply, result);
       }
 
       const result = await gateway.complete(key, body, abort.signal);
+      Object.assign(request.summary, {
+        provider: result.target?.provider,
+        upstreamModel: result.target?.model,
+        attempts: result.attempts,
+        cache: result.cache,
+      });
       return reply
         .headers({
           "x-gateway-cache": result.cache,
@@ -113,6 +209,7 @@ async function sendStream(request: FastifyRequest, reply: FastifyReply, result: 
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     connection: "keep-alive",
+    "x-request-id": request.id,
     "x-gateway-cache": "SKIP",
     "x-gateway-redactions": String(guardrailFindings),
     ...routingHeaders(target, attempts),
@@ -188,6 +285,15 @@ function parseBody(raw: unknown): MessagesRequest {
     throw new GatewayError(400, "invalid_request_error", detail);
   }
   return parsed.data;
+}
+
+function loggerOptions(logger: true | { stream: Writable; level?: string }) {
+  const base = {
+    level: "info",
+    // Defence in depth: never log credentials even if headers get logged somewhere.
+    redact: ["req.headers.authorization", 'req.headers["x-api-key"]'],
+  };
+  return logger === true ? base : { ...base, ...logger };
 }
 
 function errorBody(type: string, message: string) {
