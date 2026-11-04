@@ -54,6 +54,8 @@ export const ConfigSchema = z
       .object({
         /** Per-attempt deadline. For streams it bounds the time to the first byte. */
         timeoutMs: z.number().positive().default(30_000),
+        /** Once a stream has started, the longest allowed gap between two chunks. */
+        streamIdleTimeoutMs: z.number().positive().default(30_000),
         retry: z
           .object({
             maxAttempts: z.number().int().min(1).default(3),

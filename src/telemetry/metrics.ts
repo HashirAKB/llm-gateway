@@ -24,6 +24,14 @@ export class Metrics {
     registers: [this.registry],
   });
 
+  readonly timeToFirstToken = new Histogram({
+    name: "gateway_time_to_first_token_seconds",
+    help: "Streams only: time from request arrival until the upstream's first chunk",
+    labelNames: ["key", "model"] as const,
+    buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    registers: [this.registry],
+  });
+
   readonly upstreamFailures = new Counter({
     name: "gateway_upstream_failures_total",
     help: "Failed upstream attempts (including ones later recovered by retry or fallback)",

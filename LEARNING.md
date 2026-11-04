@@ -205,11 +205,11 @@ Write a `PromptLengthGuardrail` that rejects requests whose total prompt is long
 
 *Hint:* a `before` hook may throw a `GatewayError`; the error handler already renders it. Write the HTTP test first, modelled on `test/guardrails.test.ts`.
 
-### Exercise 4. Add a time-to-first-token metric (extend it)
+### Exercise 4. Count tokens per second for streams (extend it)
 
-Add a `gateway_time_to_first_token_seconds` histogram, observed when a stream's `start` chunk arrives.
+Add a `gateway_stream_output_tokens_per_second` histogram: output tokens divided by the time between the first and the last chunk.
 
-*Hint:* `Gateway.runStream` knows `startedAt`, and `router.openStream` returns exactly when the first chunk has arrived. Add the histogram to `Metrics` and assert on `/metrics` in `test/observability.test.ts`.
+*Hint:* `gateway_time_to_first_token_seconds` (in `Gateway.runStream`) already shows where the first chunk is timed. Record the end time inside the `chunks` generator when the `end` chunk arrives, and assert on `/metrics` the way `test/streaming-timeouts.test.ts` does.
 
 ### Exercise 5. Make the cache shared (extend it)
 

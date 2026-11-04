@@ -138,3 +138,8 @@ Decisions made while building without the owner available. Each entry: decision,
 - **Decision:** config accepts `keyHash` (preferred) or `key` (plaintext, for quick local setups), exactly one per key. Lookups hash the presented secret and match on the hash. The default config ships hashes only. Key names must be unique.
 - **Alternatives:** bcrypt/argon2; keeping plaintext.
 - **Why:** a leaked config file no longer leaks working keys. Slow password hashes protect low-entropy secrets; virtual keys are long random strings, so SHA-256 is enough and keeps per-request cost negligible.
+
+## D30. Stream idle timeout and time-to-first-token
+- **Decision:** after the first chunk, each chunk must arrive within `resilience.streamIdleTimeoutMs` (default 30s). On timeout the upstream is cancelled through a dedicated abort controller and the client gets an SSE `error` event. Time to first token is a separate histogram, labelled by key and alias.
+- **Alternatives:** a total stream deadline.
+- **Why:** long answers legitimately take minutes, so a total deadline would cut off healthy streams; silence is the real failure signal. TTFT is the latency users perceive in chat UIs, so it deserves its own metric.

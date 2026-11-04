@@ -159,6 +159,9 @@ export class Gateway {
     const routed = await this.track(key, () => this.deps.router.openStream(request.model, toUpstream(request), signal));
     const { target, attempts } = routed;
     const { start, rest } = routed.value;
+    const ttftMs = this.now() - startedAt;
+    this.deps.metrics.timeToFirstToken.observe({ key: key.name, model: body.model }, ttftMs / 1000);
+    span.setAttribute("gateway.time_to_first_token_ms", ttftMs);
 
     // Wrap the upstream iterator so accounting happens when the stream finishes.
     // Latency for streams is measured to the end of the stream.

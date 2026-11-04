@@ -6,12 +6,12 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 
 - `POST /v1/messages`, a Messages-style API with JSON and SSE streaming, authenticated by per-app virtual keys stored as SHA-256 hashes.
 - Routing from aliases (`fast`, `smart`) to ordered provider models, with fallback.
-- Resilience per target: retries with exponential backoff and full jitter (retryable errors only), per-attempt timeouts via `AbortSignal`, and a per-provider circuit breaker (closed, open, half-open). Streams are retried only before the first byte.
+- Resilience per target: retries with exponential backoff and full jitter (retryable errors only), per-attempt timeouts via `AbortSignal`, and a per-provider circuit breaker (closed, open, half-open). Streams are retried only before the first byte, then guarded by an idle timeout between chunks.
 - Per-key token-bucket rate limits for requests/min and tokens/min, with an in-memory store and an atomic Redis (Lua) store that pass the same contract tests.
 - An exact-match response cache with TTL and LRU eviction, keyed on a normalised request hash, scoped per tenant, limited to deterministic non-streaming requests.
 - Cost metering from a price table, `GET /v1/usage`, and hard per-key budgets returning `429 budget_exceeded`.
 - A pluggable guardrail interface with a regex PII redactor for emails and phone numbers (toggleable).
-- Observability: one structured JSON log line per request with request ids, Prometheus `/metrics` (latency histogram, upstream failures, retries, fallbacks, cache lookups, tokens, cost, breaker state), and OpenTelemetry spans for each request and each upstream attempt.
+- Observability: one structured JSON log line per request with request ids, Prometheus `/metrics` (latency and time-to-first-token histograms, upstream failures, retries, fallbacks, cache lookups, tokens, cost, breaker state), and OpenTelemetry spans for each request and each upstream attempt.
 - A static dashboard showing usage, p50/p95 latency, cache hit rate, cost and budget use per key.
 - An autocannon load test with committed results, an offline demo script, Dockerfile, docker-compose (gateway, Redis, Jaeger, Prometheus), and CI running lint, typecheck, tests (with a Redis service) and a Docker build plus smoke test.
 
@@ -33,7 +33,6 @@ A self-hostable LLM gateway in TypeScript (Node 22, Fastify) that sits between c
 - Usage, budgets, cache and breakers are per process and in memory; a restart resets spend.
 - Concurrent requests can overshoot a budget by their own cost.
 - PII redaction is regex-based and input-only for streams.
-- No time-to-first-token metric or idle timeout between stream chunks yet.
 - Token estimates before a call use a 4 characters per token heuristic.
 
 ## Resume bullets

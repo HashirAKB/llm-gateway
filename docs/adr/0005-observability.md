@@ -17,5 +17,5 @@ Operators need to answer: is it up, how slow is it, where do errors come from, w
 ## Consequences
 
 - Ratios such as cache hit rate are computed in PromQL from counters, the idiomatic Prometheus approach.
-- For streams, the latency histogram and the request span end at the last byte, which is what the client experiences. Time to first token is not yet a separate metric.
+- For streams, the latency histogram and the request span end at the last byte, which is what the client experiences. Time to first token has its own histogram (`gateway_time_to_first_token_seconds`).
 - Usage data is lost on restart; Prometheus is the durable record.

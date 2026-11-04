@@ -39,3 +39,28 @@ export async function withTimeout<T>(
     clearTimeout(timer);
   }
 }
+
+/**
+ * Wraps an iterator so that each `next()` must produce an item within `idleMs`.
+ * Used for streams after the first byte: a stream that goes silent would
+ * otherwise hold the client connection open forever. On timeout, `onIdle`
+ * is called (to cancel the upstream) and a ProviderError is thrown.
+ */
+export function withIdleTimeout<T>(iterator: AsyncIterator<T>, idleMs: number, onIdle: () => void): AsyncIterator<T> {
+  return {
+    async next() {
+      let timer: NodeJS.Timeout | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          onIdle();
+          reject(new ProviderError(`upstream stream sent no data for ${idleMs}ms`, undefined, true));
+        }, idleMs);
+      });
+      try {
+        return await Promise.race([iterator.next(), idle]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}

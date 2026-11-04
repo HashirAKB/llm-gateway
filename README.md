@@ -139,7 +139,7 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 - **Provider interface with a mock as default** ([ADR 0001](docs/adr/0001-provider-interface-and-mock-first.md)). Everything is testable offline. The cost: SSE is re-rendered from provider-neutral chunks, so only text content is supported.
 - **Resilience order is fallback > retry > breaker > timeout** ([ADR 0002](docs/adr/0002-resilience-layering.md)). An opening breaker immediately stops retries and moves to the next target. Only retryable errors count against the breaker.
-- **Streams can only be retried before the first byte.** After that, a failure is an SSE `error` event, because sent bytes cannot be taken back.
+- **Streams can only be retried before the first byte.** After that, a failure is an SSE `error` event, because sent bytes cannot be taken back. The first byte is bounded by the per-attempt timeout; every later chunk by an idle timeout (`streamIdleTimeoutMs`), so a silent upstream cannot hold a connection forever. Time to first token is its own histogram.
 - **Client disconnects are not upstream failures.** They cancel the upstream call, are never retried, and never count against a circuit breaker.
 - **Rate limits check an estimate, then reconcile** ([ADR 0003](docs/adr/0003-token-bucket-rate-limits.md)). Exact real token counts are only known after the call. The bucket can go negative, which keeps the long-run rate correct.
 - **The Redis store runs the token bucket in Lua** for atomicity across instances, with Redis `TIME` as the shared clock.
@@ -164,11 +164,10 @@ Short form below. The reasoning for each is in [docs/adr](docs/adr) and [DECISIO
 
 ## What I'd do next
 
-1. Add a time-to-first-token histogram and an idle timeout between stream chunks.
-2. Reserve worst-case cost before a call and release the remainder after, so concurrent requests cannot overshoot a budget.
-3. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
-4. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
-5. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
+1. Reserve worst-case cost before a call and release the remainder after, so concurrent requests cannot overshoot a budget.
+2. Run output guardrails on streams by scanning a small rolling buffer before forwarding text.
+3. Move the response cache and usage ledger to Redis, so several instances share them and spend survives restarts.
+4. Add latency-aware routing: prefer the target with the best recent p95 among healthy ones.
 
 ## Project layout
 

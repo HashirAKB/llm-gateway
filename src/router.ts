@@ -4,7 +4,7 @@ import { GatewayError, ProviderError } from "./errors.js";
 import type { Provider, ProviderResponse, StreamChunk, UpstreamRequest } from "./providers/provider.js";
 import { CircuitBreaker, type BreakerState } from "./resilience/circuit-breaker.js";
 import { retry } from "./resilience/retry.js";
-import { withTimeout } from "./resilience/timeout.js";
+import { withIdleTimeout, withTimeout } from "./resilience/timeout.js";
 import { markSpanError } from "./telemetry/tracing.js";
 
 /** An open upstream stream whose first chunk (`start`) has already arrived. */
@@ -89,9 +89,13 @@ export class Router {
    * Opens a stream and waits for its first chunk. Retries and fallback apply
    * only up to that point: once the caller starts forwarding bytes to the
    * client, a failure can no longer be hidden by switching providers.
+   * The rest of the stream is guarded by an idle timeout instead.
    */
-  openStream(alias: string, req: UpstreamRequest, signal: AbortSignal): Promise<Routed<OpenStream>> {
-    return this.withFallback(alias, signal, async (provider, model, attemptSignal) => {
+  async openStream(alias: string, req: UpstreamRequest, signal: AbortSignal): Promise<Routed<OpenStream>> {
+    // A second abort source, used to cancel the upstream if it goes silent mid-stream.
+    const idle = new AbortController();
+    const streamSignal = AbortSignal.any([signal, idle.signal]);
+    const routed = await this.withFallback(alias, streamSignal, async (provider, model, attemptSignal) => {
       const iterator = provider.stream({ ...req, model }, attemptSignal)[Symbol.asyncIterator]();
       const first = await iterator.next();
       if (first.done || first.value.type !== "start") {
@@ -99,6 +103,9 @@ export class Router {
       }
       return { start: first.value, rest: iterator };
     });
+    // After the first chunk, each further chunk must arrive within the idle timeout.
+    const rest = withIdleTimeout(routed.value.rest, this.resilience.streamIdleTimeoutMs, () => idle.abort());
+    return { ...routed, value: { ...routed.value, rest } };
   }
 
   private async withFallback<T>(

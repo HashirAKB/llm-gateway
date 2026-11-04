@@ -13,7 +13,7 @@ Each milestone: tests first, simplest implementation, all checks green, commit, 
 ## After the Definition of Done: "What I'd do next" (from README)
 
 - [x] N1 Store virtual keys as SHA-256 hashes
-- [ ] N2 Time-to-first-token histogram and stream idle timeout
+- [x] N2 Time-to-first-token histogram and stream idle timeout
 - [ ] N3 Budget reservation for concurrent requests
 - [ ] N4 Output guardrails on streams
 - [ ] N5 Redis-backed response cache and usage ledger
